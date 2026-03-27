@@ -1,0 +1,22 @@
+[Unit]
+Description=Aribot Live Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/aribot
+EnvironmentFile=/etc/aribot/aribot.env
+ExecStart=/opt/aribot/.venv/bin/python /opt/aribot/usdt_paper_bot_v2.py
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=42
+TimeoutStopSec=45
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

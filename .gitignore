@@ -1,0 +1,27 @@
+leverage_optimizer.html
+paper_bot_v2_improvements.docx
+
+# Local secrets and runtime control artifacts
+.env
+.env.*
+!.env.example
+kill_switch.flag
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local runtime data
+*.db
+*.log
+*.jsonl
+*trading_log.txt
+ARCHIVED_*.db
+ARCHIVED_*.log
+ARCHIVED_*.txt
+
+# Local analysis outputs
+bucket_classification_report.json

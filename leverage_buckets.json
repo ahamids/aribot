@@ -1,0 +1,80 @@
+{
+  "major": {
+    "leverage": 5,
+    "symbols": [
+      "BTC",
+      "ETH"
+    ]
+  },
+  "large_alt": {
+    "leverage": 3,
+    "symbols": [
+      "1000PEPE",
+      "ADA",
+      "ATOM",
+      "AVAX",
+      "BNB",
+      "DOGE",
+      "DOT",
+      "FARTCOIN",
+      "HYPE",
+      "LINK",
+      "LTC",
+      "NEAR",
+      "PAXG",
+      "RIVER",
+      "SIREN",
+      "SOL",
+      "TAO",
+      "TRUMP",
+      "XAUT",
+      "XRP",
+      "ZEC"
+    ]
+  },
+  "mid_cap": {
+    "leverage": 2,
+    "symbols": [
+      "1000BONK",
+      "AAVE",
+      "APT",
+      "ARB",
+      "ASTER",
+      "BARD",
+      "BCH",
+      "CRV",
+      "ENA",
+      "HBAR",
+      "INJ",
+      "JTO",
+      "JUP",
+      "KITE",
+      "M",
+      "MNT",
+      "MON",
+      "ONDO",
+      "ONT",
+      "OP",
+      "PENGU",
+      "PIPPIN",
+      "PUMPFUN",
+      "RENDER",
+      "SEI",
+      "SUI",
+      "TIA",
+      "TRX",
+      "UNI",
+      "VIRTUAL",
+      "VVV",
+      "WIF",
+      "WLD",
+      "WLFI",
+      "XAG",
+      "XAU",
+      "XLM",
+      "XPL",
+      "ZRO"
+    ]
+  },
+  "default_leverage": 1
+}
