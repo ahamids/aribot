@@ -172,7 +172,7 @@ class PaperTradingBotV2:
         self.max_open_positions = 10
         self.max_tick_age_seconds = 600
         self.min_24h_volume_usdc = 5_000_000
-        self.entry_risk_pct = 0.015
+        self.entry_risk_pct = 0.11 # 11% of current balance per trade
         self.atr_volatility_cutoff = 0.05
         self.atr_size_scalar = 0.5
         self.round_trip_fee_rate = 0.0011
@@ -395,17 +395,31 @@ class PaperTradingBotV2:
 
         try:
             ohlcv = self.exchange.fetch_ohlcv(self.btc_regime_symbol, '4h', limit=260)
-            if not ohlcv or len(ohlcv) < 200:
+            if not ohlcv:
+                self.logger.warning(
+                    f"⚠️ BTC regime fetch returned empty OHLCV for {self.btc_regime_symbol}"
+                )
+                return None
+            if len(ohlcv) < 200:
+                self.logger.warning(
+                    f"⚠️ BTC regime OHLCV insufficient: got {len(ohlcv)} candles, need 200 ({self.btc_regime_symbol})"
+                )
                 return None
 
             ohlc4_values = self.calculate_ohlc4(ohlcv)
             current_ohlc4 = ohlc4_values[-1]
             btc_wma_200 = self.calculate_wma(ohlc4_values, period=200, offset=0)
             if btc_wma_200 is None:
+                self.logger.warning(
+                    f"⚠️ BTC regime WMA-200 calculation returned None for {self.btc_regime_symbol}"
+                )
                 return None
 
             return 'BUY' if current_ohlc4 > btc_wma_200 else 'SELL'
-        except Exception:
+        except Exception as exc:
+            self.logger.warning(
+                f"⚠️ BTC regime fetch failed for {self.btc_regime_symbol}: {type(exc).__name__}: {exc}"
+            )
             return None
 
     def get_ticker_quote_volume(self, ticker):
