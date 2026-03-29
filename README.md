@@ -30,11 +30,17 @@ What is implemented now:
 6. Structured logs, funding tracking, Telegram alert routing, and kill switch support
 7. Validation scripts and a go-live runbook
 
-What is not fully implemented yet:
+Recently implemented for live readiness:
 
-1. Full live order lifecycle management for partial fills and terminal exchange order states
-2. End-to-end real Telegram delivery verification in this repo by default
-3. A complete live execution engine wired into the main strategy loop
+1. Live execution engine wiring in the main strategy loop for `shadow` and `live` modes
+2. Terminal-state and partial-fill aware order handling in `order_executor.py`
+3. Startup Telegram end-to-end delivery verification path (bot auth + message probe)
+
+Remaining hardening work:
+
+1. Expanded exchange-side reconciliation for complex multi-order partial-close sequences
+2. Production runbook evidence capture for repeated mainnet dry-runs
+3. Additional alerting escalation channels beyond Telegram
 
 ## Repository Layout
 
@@ -116,10 +122,11 @@ Mode behavior is currently:
 2. `shadow`
    Requires validated Bybit keypairs
    Runs startup permission checks and startup reconciliation
-   Intended for authenticated non-promoted operation
+   Uses live execution path in exchange `DRY_RUN` mode (no real order submission)
 3. `live`
-   Same startup requirements as `shadow`
-   Reserved for the real-money promotion path described in the runbook
+   Uses live execution path with trade key order submission enabled
+   Uses exchange USDT balance for position sizing
+   Enforces startup Telegram verification when `TELEGRAM_VERIFY_ON_START=true`
 
 ## Environment Setup
 
@@ -140,6 +147,11 @@ Important variables:
    Withdrawal permission must be disabled
 6. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
    Optional, only needed if you want Telegram alert delivery
+7. `TELEGRAM_VERIFY_ON_START`
+   Defaults to `true`
+   In `live`, startup fails if end-to-end Telegram verification fails
+8. `ORDER_STATUS_TIMEOUT_SECONDS` and `ORDER_STATUS_POLL_INTERVAL_SECONDS`
+   Optional tuning for order terminal-state polling in the executor
 
 ## Running the Bot
 
@@ -154,7 +166,8 @@ The bot will:
 1. Validate startup secrets
 2. Load markets and leverage config
 3. In `shadow` or `live`, run authenticated startup reconciliation
-4. Start the main loop
+4. Verify Telegram delivery readiness (if enabled)
+5. Start the main loop
 
 Stop with `Ctrl+C`.
 
@@ -173,6 +186,7 @@ The active strategy loop currently:
 3. Applies BTC regime gating
 4. Evaluates new entries near 4-hour UTC boundaries
 5. Simulates position sizing using leverage buckets from [leverage_buckets.json](leverage_buckets.json)
+   In `shadow`/`live`, sizing is based on synced exchange USDT balance
 6. Manages open positions with:
    - stop-loss checks
    - trailing stop logic
@@ -233,8 +247,8 @@ Deployment and promotion references:
 
 ## Notes and Caveats
 
-1. The main strategy file still simulates positions locally. It is not yet a fully wired live order-management runtime.
-2. `shadow` and `live` currently differ mainly in startup safety expectations and promotion intent, not in a separate execution engine inside the main loop.
+1. The strategy now contains a dual-path runtime: paper simulation and live execution wiring.
+2. `shadow` uses exchange-dry-run execution; `live` submits market orders via the executor.
 3. If you run in `paper`, authenticated startup reconciliation is intentionally skipped.
 4. If you run in `shadow` or `live`, valid Bybit credentials must be configured or startup will fail.
 

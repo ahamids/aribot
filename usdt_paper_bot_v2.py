@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 from alert_dispatcher import AlertDispatcher
 from observability import FundingTracker, KillSwitchMonitor, StructuredEventLogger
+from order_executor import OrderExecutor
 from secret_loader import SecretLoader, SecretValidationError
 from startup_reconciler import StartupReconciler
 
@@ -142,10 +143,12 @@ class PaperPosition:
         return self.age_minutes() >= max_minutes
 
 
-class PaperTradingBotV2:
+class Aribot:
     def __init__(self, startup_secrets=None):
         self.setup_logging()
         self.bot_mode = str(getattr(startup_secrets, 'bot_mode', os.getenv('BOT_MODE', 'paper'))).strip().lower()
+        self.live_execution_enabled = self.bot_mode in {'shadow', 'live'}
+        self.telegram_verify_on_start = str(os.getenv('TELEGRAM_VERIFY_ON_START', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self.bybit_testnet = bool(
             getattr(startup_secrets, 'bybit_testnet', None)
             if startup_secrets is not None
@@ -160,6 +163,17 @@ class PaperTradingBotV2:
         self.exchange = ccxt.bybit(exchange_config)
         if self.bybit_testnet:
             self.exchange.set_sandbox_mode(True)
+        self.order_executor = None
+        if startup_secrets is not None and self.live_execution_enabled:
+            self.order_executor = OrderExecutor(
+                startup_secrets.trade_api_key,
+                startup_secrets.trade_api_secret,
+            )
+            if self.bybit_testnet:
+                self.order_executor.exchange.set_sandbox_mode(True)
+            # In shadow mode, submit intents but never send orders to exchange.
+            if self.bot_mode == 'shadow':
+                self.order_executor.dry_run = True
         self.positions = {}
         self.closed_trades = []
         self.kill_switch_file = os.getenv('KILL_SWITCH_FILE', 'kill_switch.flag')
@@ -211,7 +225,7 @@ class PaperTradingBotV2:
         self.usdc_swaps = [symbol for symbol in self.markets.keys() if self.markets[symbol].get('type') == 'swap' and 'USDT' in symbol]
         self.btc_regime_symbol = self.resolve_btc_regime_symbol()
 
-        self.db_file = 'usdt_paper_bot_v2.db'
+        self.db_file = 'usdt_bot_v2.db'
         self.db = sqlite3.connect(self.db_file, detect_types=sqlite3.PARSE_DECLTYPES)
         self.db.row_factory = sqlite3.Row
         self.setup_database()
@@ -239,7 +253,149 @@ class PaperTradingBotV2:
             self.request_clean_shutdown,
         )
         self.load_state()
+        balance_synced = self.sync_account_balance(force=False)
+        if balance_synced:
+            self.rebase_daily_drawdown_baseline_after_live_sync()
         self.reconcile_positions_on_startup()
+
+    def verify_telegram_readiness(self):
+        if not self.telegram_verify_on_start:
+            self.logger.info('📨 Telegram verification disabled via TELEGRAM_VERIFY_ON_START=false')
+            return
+
+        probe = (
+            f"Aribot startup verification: mode={self.bot_mode}, testnet={self.bybit_testnet}, "
+            f"run_id={self.run_id}"
+        )
+        ok = self.alert_dispatcher.verify_delivery(probe)
+        if ok:
+            self.logger.info('📨 Telegram delivery verification succeeded')
+            return
+
+        if self.bot_mode == 'live':
+            raise RuntimeError('Telegram end-to-end verification failed in live mode')
+        self.logger.warning('📨 Telegram verification failed; continuing because mode is not live')
+
+    def fetch_exchange_usdt_balance(self):
+        if not self.live_execution_enabled:
+            return None
+
+        try:
+            balance = self.exchange.fetch_balance()
+        except Exception as exc:
+            self.logger.warning(f"⚠️ Failed to fetch exchange balance: {type(exc).__name__}: {exc}")
+            return None
+
+        usdt_bucket = balance.get('USDT') if isinstance(balance, dict) else None
+        candidate_values = []
+        if isinstance(usdt_bucket, dict):
+            candidate_values.extend([
+                usdt_bucket.get('total'),
+                usdt_bucket.get('free'),
+            ])
+        candidate_values.extend([
+            (balance.get('total') or {}).get('USDT') if isinstance(balance.get('total'), dict) else None,
+            (balance.get('free') or {}).get('USDT') if isinstance(balance.get('free'), dict) else None,
+        ])
+
+        for value in candidate_values:
+            try:
+                amount = float(value)
+            except (TypeError, ValueError):
+                continue
+            if amount > 0:
+                return amount
+        return None
+
+    def sync_account_balance(self, force=False):
+        if not self.live_execution_enabled:
+            return False
+        if not force and self.bot_mode == 'shadow':
+            # Shadow mode keeps PnL simulation continuity, but still supports manual forced refresh.
+            return False
+
+        exchange_balance = self.fetch_exchange_usdt_balance()
+        if exchange_balance is None:
+            return False
+
+        old_balance = self.current_balance
+        self.current_balance = exchange_balance
+        if abs(old_balance - self.current_balance) >= 0.01:
+            self.logger.info(
+                f"💼 Synced exchange USDT balance: {old_balance:.2f} -> {self.current_balance:.2f}"
+            )
+        self.persist_runtime_state()
+        return True
+
+    def rebase_daily_drawdown_baseline_after_live_sync(self):
+        if not self.live_execution_enabled:
+            return False
+        if self.daily_drawdown_paused or self.positions:
+            return False
+        if self.total_trades != 0 or abs(self.total_pnl) > 1e-9:
+            return False
+        if abs(self.session_start_balance - self.initial_balance) >= 0.01:
+            return False
+        if abs(self.current_balance - self.initial_balance) < 0.01:
+            return False
+
+        old_baseline = self.session_start_balance
+        self.session_start_balance = self.current_balance
+        self.logger.info(
+            f"🧮 Rebased daily drawdown baseline after live balance sync: {old_baseline:.2f} -> {self.session_start_balance:.2f}"
+        )
+        return True
+
+    def submit_market_order(self, symbol, side, quantity, reason, idempotency_key):
+        if self.order_executor is None:
+            return False, None
+
+        result = self.order_executor.execute_order(
+            symbol=symbol,
+            order_type='market',
+            side=side,
+            amount=quantity,
+            idempotency_key=idempotency_key,
+        )
+        if not result.success:
+            self.logger.error(f"❌ Order failed for {symbol} ({reason}): {result.message}")
+            self.emit_structured_event(
+                'CRITICAL',
+                'live_order_rejected',
+                'execution',
+                'Exchange order failed.',
+                symbol=symbol,
+                values={
+                    'reason': reason,
+                    'side': side,
+                    'quantity': quantity,
+                    'message': result.message,
+                    'idempotency_key': result.idempotency_key,
+                },
+            )
+            return False, result.order_data
+
+        return True, result.order_data
+
+    @staticmethod
+    def extract_order_fill(order_data, fallback_price, fallback_qty):
+        data = order_data or {}
+        try:
+            filled = float(data.get('filled') or fallback_qty)
+        except (TypeError, ValueError):
+            filled = float(fallback_qty)
+        if filled <= 0:
+            filled = float(fallback_qty)
+
+        avg_fill_price = data.get('avg_fill_price', data.get('average', data.get('price', fallback_price)))
+        try:
+            fill_price = float(avg_fill_price)
+        except (TypeError, ValueError):
+            fill_price = float(fallback_price)
+        if fill_price <= 0:
+            fill_price = float(fallback_price)
+
+        return fill_price, filled
 
     def emit_structured_event(self, level, event_type, component, message, symbol=None, values=None):
         self.structured_logger.emit(level, event_type, component, message, symbol=symbol, values=values)
@@ -618,7 +774,7 @@ class PaperTradingBotV2:
         return self.default_leverage, 'default'
 
     def setup_logging(self):
-        self.logger = logging.getLogger('PaperTradingBotV2')
+        self.logger = logging.getLogger('Aribot')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -626,7 +782,7 @@ class PaperTradingBotV2:
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
 
-        file_handler = logging.FileHandler('usdt_paper_trading_log.txt', mode='a')
+        file_handler = logging.FileHandler('usdt_trading_log.txt', mode='a')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
 
@@ -1011,6 +1167,21 @@ class PaperTradingBotV2:
         gross_qty = gross_notional / price
         qty = net_notional / price
         side = 'long' if analysis['signal'] == 'BUY' else 'short'
+
+        if self.live_execution_enabled:
+            order_side = 'buy' if side == 'long' else 'sell'
+            order_key = f"entry:{symbol}:{order_side}:{int(time.time() // 60)}"
+            ok, order_data = self.submit_market_order(
+                symbol=symbol,
+                side=order_side,
+                quantity=qty,
+                reason='entry',
+                idempotency_key=order_key,
+            )
+            if not ok:
+                return False
+            price, qty = self.extract_order_fill(order_data, fallback_price=price, fallback_qty=qty)
+
         pos = PaperPosition(symbol, side, price, qty, datetime.datetime.now())
         pos.round_trip_fee_rate = self.round_trip_fee_rate
         self.positions[symbol] = pos
@@ -1110,6 +1281,34 @@ class PaperTradingBotV2:
         pos = self.positions.pop(symbol, None)
         if not pos:
             return
+
+        if self.live_execution_enabled and pos.quantity > 0:
+            exit_side = 'sell' if pos.side == 'long' else 'buy'
+            order_key = f"exit:{symbol}:{exit_side}:{int(time.time() // 60)}:{reason}"
+            ok, order_data = self.submit_market_order(
+                symbol=symbol,
+                side=exit_side,
+                quantity=pos.quantity,
+                reason=reason,
+                idempotency_key=order_key,
+            )
+            if not ok:
+                # Put the position back so it can be retried next cycle.
+                self.positions[symbol] = pos
+                return
+
+            fill_price, filled_qty = self.extract_order_fill(
+                order_data,
+                fallback_price=pos.current_price,
+                fallback_qty=pos.quantity,
+            )
+            if filled_qty <= 0:
+                self.logger.warning(f"⚠️ Exit order returned zero fill for {symbol}; deferring close")
+                self.positions[symbol] = pos
+                return
+            pos.quantity = min(pos.quantity, filled_qty)
+            pos.update_price(fill_price)
+
         self.current_balance += pos.pnl
         self.total_pnl += pos.pnl
         if pos.pnl > 0:
@@ -1177,6 +1376,55 @@ class PaperTradingBotV2:
             partial = pos.should_take_partial_profit()
             if partial:
                 idx, level = partial
+                if self.live_execution_enabled:
+                    partial_qty = pos.quantity * pos.profit_taking_sizes[idx]
+                    if partial_qty > 0:
+                        partial_side = 'sell' if pos.side == 'long' else 'buy'
+                        order_key = f"partial:{symbol}:{partial_side}:{int(time.time() // 60)}:{idx}"
+                        ok, order_data = self.submit_market_order(
+                            symbol=symbol,
+                            side=partial_side,
+                            quantity=partial_qty,
+                            reason='partial_profit',
+                            idempotency_key=order_key,
+                        )
+                        if not ok:
+                            continue
+                        fill_price, filled_qty = self.extract_order_fill(
+                            order_data,
+                            fallback_price=pos.current_price,
+                            fallback_qty=partial_qty,
+                        )
+                        if filled_qty <= 0:
+                            continue
+                        pos.update_price(fill_price)
+                        original_qty = pos.quantity
+                        realized_ratio = min(1.0, filled_qty / original_qty) if original_qty > 0 else 0.0
+                        partial_pnl = pos.pnl * realized_ratio
+                        pos.partial_exits.append({'level': level, 'size': realized_ratio, 'pnl': partial_pnl, 'time': datetime.datetime.now()})
+                        pos.quantity = max(0.0, original_qty - filled_qty)
+                        self.current_balance += partial_pnl
+                        self.total_pnl += partial_pnl
+                        self.record_partial_realization(symbol, level, realized_ratio, partial_pnl)
+                        self.persist_runtime_state()
+                        self.logger.info(f"💰 LIVE PARTIAL EXIT {symbol} at {level*100:.1f}% -> {partial_pnl:.2f}")
+                        self.emit_structured_event(
+                            'INFO',
+                            'partial_exit',
+                            'execution',
+                            'Partial profit realized from exchange fill.',
+                            symbol=symbol,
+                            values={
+                                'level': level,
+                                'size': realized_ratio,
+                                'pnl': partial_pnl,
+                                'filled_qty': filled_qty,
+                                'fill_price': fill_price,
+                            },
+                        )
+                        self.persist_position(pos)
+                        continue
+
                 partial_pnl = pos.take_partial_profit(idx, level)
                 self.current_balance += partial_pnl
                 self.total_pnl += partial_pnl
@@ -1269,6 +1517,7 @@ class PaperTradingBotV2:
 
             cycle += 1
             self.logger.info(f"\n🔄 Cycle {cycle} @ {datetime.datetime.now()}")
+            self.sync_account_balance(force=False)
             self.reset_daily_session_if_needed()
             self.update_daily_drawdown_pause()
             self.update_positions()
@@ -1347,6 +1596,11 @@ class PaperTradingBotV2:
         return self.shutdown_exit_code
 
 
+
+# Backward compatibility for scripts still importing the legacy class name.
+PaperTradingBotV2 = Aribot
+
+
 if __name__ == '__main__':
     load_dotenv(override=True)
     try:
@@ -1363,9 +1617,10 @@ if __name__ == '__main__':
         raise SystemExit(2)
 
     try:
-        bot = PaperTradingBotV2(startup_secrets=startup_secrets)
+        bot = Aribot(startup_secrets=startup_secrets)
+        bot.verify_telegram_readiness()
     except RuntimeError as exc:
-        print(f"Startup reconciliation failed: {exc}")
+        print(f"Startup readiness failed: {exc}")
         raise SystemExit(3)
 
     try:

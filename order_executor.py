@@ -4,6 +4,7 @@ import sqlite3
 import json
 import hashlib
 import datetime
+import time
 import ccxt
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
@@ -60,6 +61,8 @@ class OrderExecutor:
             'enableRateLimit': True,
             'options': {'defaultType': 'future'}
         })
+        self.order_status_timeout_seconds = int(os.getenv('ORDER_STATUS_TIMEOUT_SECONDS', '30'))
+        self.order_status_poll_interval_seconds = float(os.getenv('ORDER_STATUS_POLL_INTERVAL_SECONDS', '1.5'))
         self.idempotency_db_path = os.getenv('ORDER_EXECUTOR_DB', 'usdt_paper_bot_v2.db')
         self.idempotency_db = sqlite3.connect(self.idempotency_db_path)
         self.idempotency_db.row_factory = sqlite3.Row
@@ -148,13 +151,31 @@ class OrderExecutor:
                 amount=amount,
                 price=price
             )
-            logger.info(f"Order executed: {order['id']}")
-            self._mark_intent_success(effective_key, str(order.get('id')), order)
+
+            finalized = self._finalize_exchange_order(symbol, order)
+            terminal_status = str(finalized.get('terminal_status') or finalized.get('status') or '').lower()
+            order_id = str(finalized.get('id') or order.get('id') or '')
+            if not order_id:
+                raise RuntimeError('Exchange did not return an order id')
+
+            if terminal_status in {'canceled', 'cancelled', 'rejected', 'expired', 'failed'}:
+                message = f"Order reached terminal non-fill state: {terminal_status}"
+                self._mark_intent_failed(effective_key, message)
+                return OrderResult(
+                    success=False,
+                    order_id=order_id,
+                    message=message,
+                    order_data=finalized,
+                    idempotency_key=effective_key,
+                )
+
+            logger.info(f"Order executed: {order_id} status={terminal_status or 'unknown'}")
+            self._mark_intent_success(effective_key, order_id, finalized)
             return OrderResult(
                 success=True,
-                order_id=order['id'],
+                order_id=order_id,
                 message="Order executed successfully",
-                order_data=order,
+                order_data=finalized,
                 idempotency_key=effective_key,
             )
 
@@ -247,3 +268,94 @@ class OrderExecutor:
     def _default_idempotency_key(request_payload: Dict[str, Any]) -> str:
         canonical = json.dumps(request_payload, sort_keys=True, separators=(',', ':'))
         return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+    def _finalize_exchange_order(self, symbol: str, order: Dict[str, Any]) -> Dict[str, Any]:
+        """Poll terminal states when available and enrich payload with fill summary."""
+        order_id = str(order.get('id') or '')
+        if not order_id:
+            return dict(order)
+
+        finalized = dict(order)
+        if hasattr(self.exchange, 'fetch_order'):
+            terminal = self._await_terminal_order(symbol, order_id)
+            if terminal is not None:
+                finalized.update(terminal)
+
+        fill_summary = self._build_fill_summary(symbol, order_id)
+        if fill_summary:
+            finalized.update(fill_summary)
+
+        status = str(finalized.get('status') or '').lower()
+        if status:
+            finalized['terminal_status'] = status
+
+        return finalized
+
+    def _await_terminal_order(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
+        terminal_statuses = {'closed', 'canceled', 'cancelled', 'rejected', 'expired', 'failed'}
+        deadline = time.time() + max(1, self.order_status_timeout_seconds)
+        last_snapshot: Optional[Dict[str, Any]] = None
+
+        while time.time() < deadline:
+            try:
+                snapshot = self.exchange.fetch_order(order_id, symbol)
+                if isinstance(snapshot, dict):
+                    last_snapshot = snapshot
+                    status = str(snapshot.get('status') or '').lower()
+                    if status in terminal_statuses:
+                        return snapshot
+            except Exception as exc:
+                logger.warning('fetch_order polling failed for %s/%s: %s', symbol, order_id, exc)
+                break
+            time.sleep(max(0.1, self.order_status_poll_interval_seconds))
+
+        return last_snapshot
+
+    def _build_fill_summary(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        if not hasattr(self.exchange, 'fetch_my_trades'):
+            return {}
+
+        try:
+            trades = self.exchange.fetch_my_trades(symbol=symbol, limit=200)
+        except Exception as exc:
+            logger.warning('fetch_my_trades failed for %s/%s: %s', symbol, order_id, exc)
+            return {}
+
+        order_trades = [
+            t for t in (trades or [])
+            if str(t.get('order') or t.get('orderId') or '') == str(order_id)
+        ]
+        if not order_trades:
+            return {}
+
+        total_qty = 0.0
+        total_notional = 0.0
+        total_fee = 0.0
+        for trade in order_trades:
+            try:
+                qty = abs(float(trade.get('amount') or 0.0))
+                px = float(trade.get('price') or 0.0)
+            except (TypeError, ValueError):
+                continue
+
+            if qty <= 0 or px <= 0:
+                continue
+
+            total_qty += qty
+            total_notional += qty * px
+            fee_obj = trade.get('fee') or {}
+            fee_cost = fee_obj.get('cost') if isinstance(fee_obj, dict) else None
+            try:
+                total_fee += abs(float(fee_cost or 0.0))
+            except (TypeError, ValueError):
+                pass
+
+        if total_qty <= 0:
+            return {}
+
+        return {
+            'filled': total_qty,
+            'avg_fill_price': total_notional / total_qty,
+            'fill_fee_cost': total_fee,
+            'trade_count': len(order_trades),
+        }

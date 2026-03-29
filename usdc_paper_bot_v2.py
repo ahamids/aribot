@@ -132,7 +132,7 @@ class PaperPosition:
         return self.age_minutes() >= max_minutes
 
 
-class PaperTradingBotV2:
+class Aribot:
     def __init__(self):
         self.setup_logging()
         self.exchange = ccxt.bybit()
@@ -500,7 +500,7 @@ class PaperTradingBotV2:
         return self.default_leverage, 'default'
 
     def setup_logging(self):
-        self.logger = logging.getLogger('PaperTradingBotV2')
+        self.logger = logging.getLogger('Aribot')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -970,8 +970,12 @@ class PaperTradingBotV2:
             time.sleep(self.loop_interval_seconds)
 
 
+# Backward compatibility for scripts still importing the legacy class name.
+PaperTradingBotV2 = Aribot
+
+
 if __name__ == '__main__':
-    bot = PaperTradingBotV2()
+    bot = Aribot()
     try:
         bot.run()
     except KeyboardInterrupt:

@@ -51,6 +51,26 @@ class AlertDispatcher:
             self.logger.warning('Telegram alert dispatch failed: %s', exc)
             return False
 
+    def verify_delivery(self, probe_text: str) -> bool:
+        """Run an end-to-end Telegram verification: bot auth + message delivery."""
+        if not self.enabled:
+            self.logger.warning('Telegram verification skipped: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not configured')
+            return False
+
+        me_url = f'https://api.telegram.org/bot{self.bot_token}/getMe'
+        try:
+            me_response = requests.get(me_url, timeout=self.timeout)
+            me_response.raise_for_status()
+            me_payload = me_response.json()
+            if not me_payload.get('ok'):
+                self.logger.warning('Telegram getMe verification failed: %s', me_payload)
+                return False
+        except requests.RequestException as exc:
+            self.logger.warning('Telegram getMe call failed during verification: %s', exc)
+            return False
+
+        return self.send_message(probe_text)
+
     def dispatch_event(
         self,
         level: str,

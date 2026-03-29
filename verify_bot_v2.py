@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lightweight verification harness for PaperTradingBotV2.
+Lightweight verification harness for Aribot.
 
 This script runs deterministic checks for core control logic and can also assert
 that expected runtime log markers exist in a log file.
@@ -15,12 +15,12 @@ import importlib
 from pathlib import Path
 
 PaperPosition = None
-PaperTradingBotV2 = None
+AribotClass = None
 QUOTE_CCY = None
 
 
 def configure_market_context(market):
-    global PaperPosition, PaperTradingBotV2, QUOTE_CCY
+    global PaperPosition, AribotClass, QUOTE_CCY
 
     market_lc = market.lower()
     if market_lc == "usdt":
@@ -34,7 +34,7 @@ def configure_market_context(market):
 
     module = importlib.import_module(module_name)
     PaperPosition = getattr(module, "PaperPosition")
-    PaperTradingBotV2 = getattr(module, "PaperTradingBotV2")
+    AribotClass = getattr(module, "Aribot", getattr(module, "PaperTradingBotV2"))
 
 
 def contract_symbol(base):
@@ -51,7 +51,7 @@ def approx_equal(a, b, tolerance=1e-9):
 
 
 def build_bot_stub():
-    bot = PaperTradingBotV2.__new__(PaperTradingBotV2)
+    bot = AribotClass.__new__(AribotClass)
 
     class _NoopLogger:
         def info(self, *_args, **_kwargs):
@@ -305,7 +305,7 @@ def run_logic_tests():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify PaperTradingBotV2 core logic and log markers")
+    parser = argparse.ArgumentParser(description="Verify Aribot core logic and log markers")
     parser.add_argument(
         "--market",
         choices=["usdt", "usdc"],

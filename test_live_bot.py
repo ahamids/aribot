@@ -22,7 +22,7 @@ from alert_dispatcher import AlertDispatcher
 from observability import FundingTracker
 from order_executor import OrderExecutor
 from startup_reconciler import StartupReconciler
-from usdt_paper_bot_v2 import PaperPosition, PaperTradingBotV2
+from usdt_paper_bot_v2 import PaperPosition, Aribot
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -165,6 +165,7 @@ def patched_bot_workspace() -> Iterable[Path]:
             'observability.py',
             'secret_loader.py',
             'alert_dispatcher.py',
+            'order_executor.py',
             'startup_reconciler.py',
             'leverage_buckets.json',
         ]:
@@ -336,7 +337,9 @@ def test_3_kill_switch() -> tuple[str, str]:
     ]
 
     with patched_bot_workspace() as workdir:
-        db_path = workdir / 'usdt_paper_bot_v2.db'
+        bot_source = (workdir / 'usdt_paper_bot_v2.py').read_text(encoding='utf-8')
+        db_name = 'usdt_bot_v2.db' if "self.db_file = 'usdt_bot_v2.db'" in bot_source else 'usdt_paper_bot_v2.db'
+        db_path = workdir / db_name
         seed_positions_db(db_path)
 
         env = os.environ.copy()
@@ -353,14 +356,21 @@ def test_3_kill_switch() -> tuple[str, str]:
             stderr=subprocess.DEVNULL,
         )
 
-        log_path = workdir / 'usdt_paper_trading_log.txt'
+        log_candidates = [
+            workdir / 'usdt_paper_trading_log.txt',
+            workdir / 'usdt_trading_log.txt',
+        ]
         deadline = time.time() + 45
         while time.time() < deadline:
-            if log_path.exists() and 'Cycle 1' in log_path.read_text(encoding='utf-8', errors='replace'):
-                break
-            if process.poll() is not None:
-                return 'FAIL', f'Bot exited before kill-switch trigger. exit_code={process.returncode}'
-            time.sleep(1)
+            for log_path in log_candidates:
+                if log_path.exists() and 'Cycle 1' in log_path.read_text(encoding='utf-8', errors='replace'):
+                    break
+            else:
+                if process.poll() is not None:
+                    return 'FAIL', f'Bot exited before kill-switch trigger. exit_code={process.returncode}'
+                time.sleep(1)
+                continue
+            break
         else:
             process.terminate()
             return 'FAIL', 'Timed out waiting for bot to enter the main loop before kill-switch test.'
@@ -486,7 +496,7 @@ def test_7_stop_loss_every_tick() -> tuple[str, str]:
         'A breached stop triggers close_position within the same cycle.',
     ]
 
-    bot = PaperTradingBotV2.__new__(PaperTradingBotV2)
+    bot = Aribot.__new__(Aribot)
     pos = PaperPosition('BTC/USDT:USDT', 'long', 100.0, 1.0, datetime.datetime.now())
     pos.stop_loss = 95.0
 
@@ -536,6 +546,37 @@ def test_8_telegram_alert_routing() -> tuple[str, str]:
     return 'PASS', f'Alert routing confirmed for open/close events. criteria={"; ".join(criteria)}'
 
 
+def test_9_live_balance_sync_rebases_drawdown_baseline() -> tuple[str, str]:
+    criteria = [
+        'On first authenticated startup, exchange balance sync updates current_balance.',
+        'Daily drawdown baseline is rebased from the 10000 seed to the synced exchange balance.',
+        'Immediate daily drawdown halt is avoided for a fresh live run with no trades.',
+    ]
+
+    bot = Aribot.__new__(Aribot)
+    bot.live_execution_enabled = True
+    bot.daily_drawdown_paused = False
+    bot.positions = {}
+    bot.total_trades = 0
+    bot.total_pnl = 0.0
+    bot.initial_balance = 10000.0
+    bot.current_balance = 501.03
+    bot.session_start_balance = 10000.0
+    bot.logger = LOGGER
+
+    rebased = bot.rebase_daily_drawdown_baseline_after_live_sync()
+    if not rebased:
+        return 'FAIL', 'Expected baseline rebasing to occur after first live balance sync.'
+    if abs(bot.session_start_balance - 501.03) > 1e-9:
+        return 'FAIL', f'Expected session_start_balance=501.03, got {bot.session_start_balance}'
+
+    drawdown = (bot.current_balance - bot.session_start_balance) / bot.session_start_balance
+    if drawdown <= -0.05:
+        return 'FAIL', f'Expected post-rebase drawdown to be above breaker threshold, got {drawdown}'
+
+    return 'PASS', f'Baseline rebased to {bot.session_start_balance:.2f}; drawdown={drawdown:.4f}'
+
+
 def print_result(result: TestResult) -> None:
     print(f'[{result.number}] {result.name}: {result.status} ({result.duration_seconds:.2f}s)')
     print('Criteria:')
@@ -577,6 +618,7 @@ def main() -> int:
         (6, 'Idempotency key suppresses duplicate execution', test_6_idempotency),
         (7, 'Stop loss check runs every update cycle', test_7_stop_loss_every_tick),
         (8, 'Telegram alert routing for open/close events', test_8_telegram_alert_routing),
+        (9, 'Live balance sync rebases first-session drawdown baseline', test_9_live_balance_sync_rebases_drawdown_baseline),
     ]
 
     criteria_map = {
@@ -612,6 +654,10 @@ def main() -> int:
         8: [
             'Dispatch position_opened and position_closed events.',
             'Verify alert dispatcher sends both and suppresses unrelated info.',
+        ],
+        9: [
+            'Simulate first live startup with synced exchange balance below the 10000 seed.',
+            'Verify drawdown baseline is rebased before breaker evaluation.',
         ],
     }
 

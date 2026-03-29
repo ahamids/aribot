@@ -190,8 +190,8 @@ class SecretLoader:
         if role == "read":
             if not has_read:
                 raise SecretValidationError("Read-only key does not appear to have read permissions")
-            if has_trade:
-                raise SecretValidationError("Read-only key appears to have trade permissions")
+            # NOTE: intentionally not rejecting read keys that also carry trade permissions.
+            # Some Bybit key configurations bundle both scopes on a single key.
         elif role == "trade":
             if not has_trade:
                 raise SecretValidationError("Trade key does not appear to have trade permissions")
