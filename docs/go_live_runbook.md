@@ -9,6 +9,52 @@ This runbook defines the mandatory release sequence for moving from testnet to s
 3. Capture evidence for each stage in a dated folder, for example: `docs/evidence/YYYY-MM-DD-go-live/`.
 4. Any CRITICAL reconciliation failure or ghost position detection is an immediate stop condition.
 
+## Telegram Management Command Validation
+
+Run this checklist at least once per launch window and capture command transcripts in evidence.
+
+### Supported Command Surface (Exact Syntax)
+
+1. `/status`
+2. `/positions`
+3. `/pnl`
+4. `/trades [n]`
+5. `/pause`
+6. `/resume`
+7. `/close SYMBOL`
+8. `/close all`
+9. `/kill`
+10. `/config`
+
+### Confirmation Behavior (Dangerous Commands)
+
+1. `/close SYMBOL`, `/close all`, and `/kill` are execution-gated.
+2. Execution occurs only when operator replies exactly `YES` before TTL expiry.
+3. Any non-`YES` reply cancels the pending action.
+4. A newly issued dangerous command replaces any prior pending action.
+
+### Command Validation Checklist (One Step Per Endpoint)
+
+1. Run `/status`; verify mode, regime, session pnl, cycle count, drawdown %, cooldown state.
+2. Run `/positions`; verify explicit empty-state or per-position fields.
+3. Run `/pnl`; verify today realized, cumulative pnl, and wins/losses.
+4. Run `/trades`; verify today (UTC) trade list behavior.
+5. Run `/trades 2`; verify last-n behavior.
+6. Run `/pause`; verify new entries are paused while position management continues.
+7. Run `/resume`; verify new entries are re-enabled.
+8. Run `/close SYMBOL`; verify confirmation prompt, then send non-`YES` to confirm cancel path.
+9. Run `/close all`; verify confirmation prompt, then send `YES` only in controlled conditions.
+10. Run `/kill`; verify confirmation prompt only (do not send `YES` outside drill/incident).
+11. Run `/config`; verify output is read-only and includes only mode, leverage buckets, position cap, stop %.
+
+### Kill Command Operational Warning
+
+1. Confirmed `/kill` writes kill switch flag, triggers close-all flow, and requests shutdown with exit code `42`.
+2. Recovery expectation after confirmed `/kill`:
+   - preserve evidence and incident notes,
+   - remove/resolve kill switch condition,
+   - re-run startup reconciliation gates before restart.
+
 ## Stage 1 - Final Testnet Run (48 Hours)
 
 ### Objective

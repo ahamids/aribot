@@ -177,6 +177,48 @@ In live execution, entry open requires confirmed exchange fill data:
    - runtime triggers emergency close flow,
    - intentional shutdown code is `42`.
 
+## Telegram Management Commands
+
+Authorized operator chat can issue only the commands below:
+
+1. `/status`
+2. `/positions`
+3. `/pnl`
+4. `/trades [n]`
+5. `/pause`
+6. `/resume`
+7. `/close SYMBOL`
+8. `/close all`
+9. `/kill`
+10. `/config`
+
+Command behavior:
+
+1. `/trades [n]`
+   - no argument: returns all closed trades from today (UTC)
+   - with argument `n`: returns the latest `n` closed trades
+2. `/pause` blocks new entries only; existing positions keep normal management.
+3. `/resume` re-enables new entries.
+4. `/config` is read-only and reports only:
+   - mode
+   - leverage buckets
+   - position cap
+   - stop %
+5. `/config` never exposes secrets, API keys, bot token, chat id, or raw env values.
+
+Confirmation-gated commands:
+
+1. `/close SYMBOL`, `/close all`, and `/kill` require reply text exactly `YES` within the confirmation TTL window.
+2. Any non-`YES` reply cancels the pending action.
+3. A new dangerous command replaces the previous pending action.
+4. Replay `YES` with no valid pending action returns `No pending confirmation.`
+5. TTL is controlled by `TELEGRAM_CONFIRMATION_TTL_SECONDS` (default `90`, minimum `5`).
+
+Kill command warning:
+
+1. Confirmed `/kill` writes the kill switch flag, triggers close-all flow, and requests clean shutdown exit code `42`.
+2. Restart requires explicit operator recovery: investigate incident, clear kill switch flag, then relaunch.
+
 ## Bybit Call Surface
 
 ### Read-side calls

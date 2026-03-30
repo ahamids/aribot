@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -70,6 +70,134 @@ class AlertDispatcher:
             return False
 
         return self.send_message(probe_text)
+
+    def get_updates(
+        self,
+        offset: Optional[int] = None,
+        timeout_seconds: int = 0,
+        limit: int = 25,
+    ) -> Dict[str, Any]:
+        """Fetch inbound Telegram updates without raising transport exceptions."""
+        if not self.enabled:
+            return {
+                'ok': False,
+                'updates': [],
+                'next_offset': offset,
+                'error': 'telegram_not_configured',
+            }
+
+        url = f'https://api.telegram.org/bot{self.bot_token}/getUpdates'
+        params: Dict[str, Any] = {
+            'timeout': max(0, int(timeout_seconds)),
+            'limit': max(1, min(int(limit), 100)),
+        }
+        if offset is not None:
+            params['offset'] = int(offset)
+
+        try:
+            # Keep timeout bounded and deterministic for loop-level polling.
+            request_timeout = max(self.timeout, params['timeout'] + 2)
+            response = requests.get(url, params=params, timeout=request_timeout)
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as exc:
+            self.logger.warning('Telegram update polling failed: %s', exc)
+            return {
+                'ok': False,
+                'updates': [],
+                'next_offset': offset,
+                'error': str(exc),
+            }
+        except ValueError as exc:
+            self.logger.warning('Telegram update polling returned invalid JSON: %s', exc)
+            return {
+                'ok': False,
+                'updates': [],
+                'next_offset': offset,
+                'error': 'invalid_json',
+            }
+
+        if not data.get('ok'):
+            self.logger.warning('Telegram getUpdates returned non-ok response: %s', data)
+            return {
+                'ok': False,
+                'updates': [],
+                'next_offset': offset,
+                'error': 'telegram_api_non_ok',
+            }
+
+        updates = data.get('result')
+        if not isinstance(updates, list):
+            self.logger.warning('Telegram getUpdates payload missing list result: %s', data)
+            return {
+                'ok': False,
+                'updates': [],
+                'next_offset': offset,
+                'error': 'invalid_result_shape',
+            }
+
+        next_offset = offset
+        for item in updates:
+            if not isinstance(item, dict):
+                continue
+            update_id = item.get('update_id')
+            try:
+                update_id_int = int(update_id)
+            except (TypeError, ValueError):
+                continue
+            candidate = update_id_int + 1
+            if next_offset is None or candidate > next_offset:
+                next_offset = candidate
+
+        return {
+            'ok': True,
+            'updates': updates,
+            'next_offset': next_offset,
+            'error': None,
+        }
+
+    @staticmethod
+    def extract_text_updates(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract text-bearing message updates with normalized fields."""
+        if not isinstance(payload, dict):
+            return []
+
+        updates = payload.get('updates') if 'updates' in payload else payload.get('result')
+        if not isinstance(updates, list):
+            return []
+
+        extracted: List[Dict[str, Any]] = []
+        for raw_update in updates:
+            if not isinstance(raw_update, dict):
+                continue
+
+            try:
+                update_id = int(raw_update.get('update_id'))
+            except (TypeError, ValueError):
+                continue
+
+            message = raw_update.get('message') or raw_update.get('edited_message')
+            if not isinstance(message, dict):
+                continue
+
+            chat = message.get('chat')
+            if not isinstance(chat, dict):
+                continue
+
+            text = message.get('text')
+            if not isinstance(text, str):
+                continue
+
+            extracted.append(
+                {
+                    'update_id': update_id,
+                    'chat_id': str(chat.get('id', '')).strip(),
+                    'text': text.strip(),
+                }
+            )
+
+        extracted.sort(key=lambda item: item['update_id'])
+        return extracted
 
     def dispatch_event(
         self,

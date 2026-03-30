@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import datetime
+import json
 import logging
 import os
 import shutil
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 import ccxt
+import alert_dispatcher as alert_dispatcher_module
 
 from alert_dispatcher import AlertDispatcher
 from observability import FundingTracker
@@ -823,6 +825,60 @@ class CapturingDispatcher(AlertDispatcher):
     def send_message(self, text: str) -> bool:
         self.captured_messages.append(text)
         return True
+
+
+def _build_telegram_test_bot(dispatcher: Any, authorized_chat_id: str = '111') -> tuple[Aribot, list[tuple[str, Any]]]:
+    bot = Aribot.__new__(Aribot)
+    bot.logger = LOGGER
+    bot.alert_dispatcher = dispatcher
+    bot.telegram_chat_id = authorized_chat_id
+    bot.telegram_last_update_id = 0
+    bot.bot_mode = 'paper'
+    bot.last_regime_signal = 'UNKNOWN'
+    bot.current_balance = 10000.0
+    bot.session_start_balance = 10000.0
+    bot.loop_cycle_count = 0
+    bot.cooldown_until_utc = None
+    bot.manual_entry_paused = False
+    bot.manual_override_timestamp_utc = None
+    bot.daily_drawdown_paused = False
+    bot.positions = {}
+    bot.total_pnl = 0.0
+    bot.winning_trades = 0
+    bot.losing_trades = 0
+    bot.shutdown_requested = False
+    bot.shutdown_exit_code = 0
+    bot.kill_switch_file = 'kill_switch.flag'
+    bot.telegram_confirmation_ttl_seconds = 90
+    bot.telegram_pending_confirmations = {}
+    bot.emit_structured_event = lambda *_args, **_kwargs: None
+    bot.db = sqlite3.connect(':memory:', detect_types=sqlite3.PARSE_DECLTYPES)
+    bot.db.row_factory = sqlite3.Row
+    bot.db.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS closed_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            side TEXT,
+            entry_price REAL,
+            exit_price REAL,
+            quantity REAL,
+            pnl REAL,
+            pnl_percentage REAL,
+            reason TEXT,
+            open_time TEXT,
+            close_time TEXT
+        )
+        '''
+    )
+    bot.db.commit()
+    persisted_state: list[tuple[str, Any]] = []
+
+    def _set_state_value(key: str, value: Any) -> None:
+        persisted_state.append((key, value))
+
+    bot.set_state_value = _set_state_value
+    return bot, persisted_state
 
 
 def test_1_order_placement() -> tuple[str, str]:
@@ -1830,6 +1886,842 @@ def test_24_branch_b_testnet_native_stop_round_trip() -> tuple[str, str]:
                     )
 
 
+def test_25_telegram_transport_get_updates_offset_progression() -> tuple[str, str]:
+    criteria = [
+        'Telegram transport get_updates returns structured payload with updates list.',
+        'next_offset advances to max(update_id)+1 for replay-safe restart behavior.',
+    ]
+
+    original_get = alert_dispatcher_module.requests.get
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {
+                'ok': True,
+                'result': [
+                    {'update_id': 14, 'message': {'text': '/status'}},
+                    {'update_id': 16, 'message': {'text': '/pnl'}},
+                    {'update_id': 15, 'message': {'text': '/positions'}},
+                ],
+            }
+
+    def fake_get(url: str, params: dict[str, Any], timeout: int) -> FakeResponse:
+        del url
+        del timeout
+        if params.get('offset') != 10:
+            raise AssertionError(f'Expected offset=10, got params={params}')
+        return FakeResponse()
+
+    alert_dispatcher_module.requests.get = fake_get
+    try:
+        dispatcher = AlertDispatcher(bot_token='token', chat_id='111', logger=LOGGER)
+        payload = dispatcher.get_updates(offset=10, timeout_seconds=0, limit=25)
+    finally:
+        alert_dispatcher_module.requests.get = original_get
+
+    if not payload.get('ok'):
+        return 'FAIL', f'Expected ok payload, got {payload}'
+    if payload.get('next_offset') != 17:
+        return 'FAIL', f'Expected next_offset=17, got payload={payload}'
+    if len(payload.get('updates', [])) != 3:
+        return 'FAIL', f'Expected 3 updates in payload, got {payload}'
+
+    return 'PASS', f'Transport next_offset advanced correctly to 17. criteria={"; ".join(criteria)}'
+
+
+def test_26_telegram_poll_non_blocking_and_strict_parser_auth_gate() -> tuple[str, str]:
+    criteria = [
+        'Polling failures are warning-only and do not raise from poll_telegram_commands_once.',
+        'Processed updates persist telegram_last_update_id after each handled/ignored update.',
+        'Parser accepts only approved commands and invalid commands return supported-command help text.',
+        'Unauthorized chat IDs are rejected with no authorized command side effects.',
+    ]
+
+    class ScriptedDispatcher:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.sent_messages: list[str] = []
+            self.offsets: list[int] = []
+
+        def get_updates(self, offset: int | None = None, timeout_seconds: int = 0, limit: int = 25) -> dict[str, Any]:
+            del timeout_seconds
+            del limit
+            self.offsets.append(int(offset or 0))
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError('simulated transport failure')
+            return {
+                'ok': True,
+                'updates': [
+                    {'update_id': 1, 'message': {'chat': {'id': '111'}, 'text': '/status'}},
+                    {'update_id': 2, 'message': {'chat': {'id': '999'}, 'text': '/pnl'}},
+                    {'update_id': 3, 'message': {'chat': {'id': '111'}, 'text': '/notreal'}},
+                    {'update_id': 4, 'message': {'chat': {'id': '111'}, 'text': '/trades 2'}},
+                ],
+            }
+
+        def send_message(self, text: str) -> bool:
+            self.sent_messages.append(text)
+            return True
+
+    dispatcher = ScriptedDispatcher()
+    bot, persisted_state = _build_telegram_test_bot(dispatcher, authorized_chat_id='111')
+
+    try:
+        bot.poll_telegram_commands_once(cycle_index=1)
+    except Exception as exc:
+        return 'FAIL', f'Polling failure should be warning-only, but raised {type(exc).__name__}: {exc}'
+
+    if bot.telegram_last_update_id != 0:
+        return 'FAIL', f'Offset should remain 0 after failed poll, got {bot.telegram_last_update_id}'
+
+    bot.poll_telegram_commands_once(cycle_index=2)
+
+    if bot.telegram_last_update_id != 5:
+        return 'FAIL', f'Expected offset to advance to 5, got {bot.telegram_last_update_id}'
+
+    state_writes = [entry for entry in persisted_state if entry[0] == 'telegram_last_update_id']
+    if [value for _, value in state_writes] != [2, 3, 4, 5]:
+        return 'FAIL', f'Expected per-update offset persistence [2,3,4,5], got {state_writes}'
+
+    expected_help = bot.supported_telegram_commands_help_text()
+    if expected_help not in dispatcher.sent_messages:
+        return 'FAIL', f'Expected invalid-command help response, got messages={dispatcher.sent_messages}'
+    if 'Unauthorized chat.' not in dispatcher.sent_messages:
+        return 'FAIL', f'Expected unauthorized chat rejection, got messages={dispatcher.sent_messages}'
+    if not any(msg.startswith('Status\n') for msg in dispatcher.sent_messages):
+        return 'FAIL', f'Expected /status runtime output, got messages={dispatcher.sent_messages}'
+    if 'No closed trades found.' not in dispatcher.sent_messages:
+        return 'FAIL', f'Expected /trades 2 empty-state output, got messages={dispatcher.sent_messages}'
+
+    valid_cases = [
+        '/status',
+        '/positions',
+        '/pnl',
+        '/trades',
+        '/trades 3',
+        '/pause',
+        '/resume',
+        '/close all',
+        '/close BTC/USDT:USDT',
+        '/kill',
+        '/config',
+    ]
+    for raw in valid_cases:
+        parsed = bot.parse_telegram_command(raw)
+        if not parsed.get('ok'):
+            return 'FAIL', f'Expected valid parser result for {raw}, got {parsed}'
+
+    invalid_cases = [
+        '/close',
+        '/close   ',
+        '/close all now',
+        '/trades 0',
+        '/trades -1',
+        '/trades abc',
+        '/config now',
+        '/status now',
+        '/unknown',
+    ]
+    for raw in invalid_cases:
+        parsed = bot.parse_telegram_command(raw)
+        if parsed.get('ok'):
+            return 'FAIL', f'Expected invalid parser result for {raw}, got {parsed}'
+
+    return 'PASS', f'Telegram poll/parser/auth behavior satisfied task criteria. criteria={"; ".join(criteria)}'
+
+
+def _insert_closed_trade_row(bot: Aribot, symbol: str, pnl: float, pnl_pct: float, reason: str, close_time_iso: str) -> None:
+    bot.db.execute(
+        '''
+        INSERT INTO closed_trades (
+            symbol, side, entry_price, exit_price, quantity,
+            pnl, pnl_percentage, reason, open_time, close_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            symbol,
+            'long',
+            100.0,
+            101.0,
+            1.0,
+            pnl,
+            pnl_pct,
+            reason,
+            close_time_iso,
+            close_time_iso,
+        ),
+    )
+    bot.db.commit()
+
+
+def test_27_telegram_status_runtime_snapshot_fields_and_cooldown_state() -> tuple[str, str]:
+    criteria = [
+        '/status includes mode, regime, session pnl, cycle count, drawdown %, and cooldown state.',
+        'Cooldown state toggles based on cooldown_until_utc relative to now.',
+    ]
+
+    class SinkDispatcher:
+        enabled = True
+
+        def send_message(self, text: str) -> bool:
+            del text
+            return True
+
+    bot, _ = _build_telegram_test_bot(SinkDispatcher(), authorized_chat_id='111')
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    bot.bot_mode = 'shadow'
+    bot.last_regime_signal = 'BUY'
+    bot.current_balance = 9800.0
+    bot.session_start_balance = 10000.0
+    bot.loop_cycle_count = 42
+    bot.cooldown_until_utc = now + datetime.timedelta(minutes=15)
+
+    snapshot = bot.build_runtime_status_snapshot(now_utc=now)
+    required_keys = {
+        'mode',
+        'regime_direction',
+        'session_pnl',
+        'cycle_count',
+        'drawdown_pct',
+        'cooldown_active',
+        'cooldown_until_utc',
+    }
+    if set(snapshot.keys()) != required_keys:
+        return 'FAIL', f'Unexpected status snapshot keys: {snapshot.keys()}'
+
+    if snapshot['mode'] != 'shadow' or snapshot['regime_direction'] != 'BUY':
+        return 'FAIL', f'Unexpected mode/regime in snapshot: {snapshot}'
+    if abs(snapshot['session_pnl'] - (-200.0)) > 1e-9:
+        return 'FAIL', f'Expected session_pnl=-200.0, got {snapshot["session_pnl"]}'
+    if abs(snapshot['drawdown_pct'] - (-2.0)) > 1e-9:
+        return 'FAIL', f'Expected drawdown_pct=-2.0, got {snapshot["drawdown_pct"]}'
+    if snapshot['cycle_count'] != 42:
+        return 'FAIL', f'Expected cycle_count=42, got {snapshot["cycle_count"]}'
+    if not snapshot['cooldown_active']:
+        return 'FAIL', f'Expected cooldown_active=True, got {snapshot}'
+
+    bot.cooldown_until_utc = now - datetime.timedelta(minutes=1)
+    if bot.build_runtime_status_snapshot(now_utc=now)['cooldown_active']:
+        return 'FAIL', 'Expected cooldown_active=False when cooldown timestamp is in the past.'
+
+    return 'PASS', f'Status snapshot fields and cooldown toggle validated. criteria={"; ".join(criteria)}'
+
+
+def test_28_telegram_positions_output_empty_and_multi_position_rows() -> tuple[str, str]:
+    criteria = [
+        '/positions returns explicit no-open-positions message for empty state.',
+        '/positions includes symbol, side, entry, current price, pnl%, and trail active per row.',
+    ]
+
+    class SinkDispatcher:
+        enabled = True
+
+        def send_message(self, text: str) -> bool:
+            del text
+            return True
+
+    bot, _ = _build_telegram_test_bot(SinkDispatcher(), authorized_chat_id='111')
+    if bot.format_positions_command_text() != 'No open positions.':
+        return 'FAIL', f'Unexpected empty /positions output: {bot.format_positions_command_text()}'
+
+    ts = datetime.datetime.now()
+    btc = PaperPosition('BTC/USDT:USDT', 'long', 100.0, 1.0, ts)
+    btc.update_price(102.0)
+    btc.trailing_stop_active = True
+
+    eth = PaperPosition('ETH/USDT:USDT', 'short', 200.0, 1.0, ts)
+    eth.update_price(198.0)
+    eth.trailing_stop_active = False
+
+    bot.positions = {
+        btc.symbol: btc,
+        eth.symbol: eth,
+    }
+    text = bot.format_positions_command_text()
+    if 'Positions' not in text:
+        return 'FAIL', f'Missing positions header: {text}'
+    if 'BTC/USDT:USDT long' not in text or 'trail=yes' not in text:
+        return 'FAIL', f'Missing required BTC position fields: {text}'
+    if 'ETH/USDT:USDT short' not in text or 'trail=no' not in text:
+        return 'FAIL', f'Missing required ETH position fields: {text}'
+    if 'e=' not in text or 'px=' not in text or 'pnl=' not in text:
+        return 'FAIL', f'Missing entry/current/pnl markers: {text}'
+
+    return 'PASS', f'/positions formatting validated for empty and populated states. criteria={"; ".join(criteria)}'
+
+
+def test_29_telegram_pnl_uses_today_closed_trades_and_session_metrics() -> tuple[str, str]:
+    criteria = [
+        '/pnl uses UTC-today realized pnl from closed_trades.',
+        '/pnl includes cumulative pnl and win/loss counts from bot session state.',
+    ]
+
+    class SinkDispatcher:
+        enabled = True
+
+        def send_message(self, text: str) -> bool:
+            del text
+            return True
+
+    bot, _ = _build_telegram_test_bot(SinkDispatcher(), authorized_chat_id='111')
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    today_1 = now.replace(hour=1, minute=0, second=0)
+    today_2 = now.replace(hour=8, minute=30, second=0)
+    yesterday = now - datetime.timedelta(days=1)
+
+    _insert_closed_trade_row(bot, 'BTC/USDT:USDT', pnl=12.0, pnl_pct=1.2, reason='trail', close_time_iso=today_1.isoformat())
+    _insert_closed_trade_row(bot, 'ETH/USDT:USDT', pnl=-3.0, pnl_pct=-0.3, reason='stop', close_time_iso=today_2.isoformat())
+    _insert_closed_trade_row(bot, 'SOL/USDT:USDT', pnl=100.0, pnl_pct=10.0, reason='time_exit', close_time_iso=yesterday.isoformat())
+
+    bot.total_pnl = 321.5
+    bot.winning_trades = 9
+    bot.losing_trades = 4
+    text = bot.format_pnl_command_text(now_utc=now)
+
+    if 'today_realized=+9.00' not in text:
+        return 'FAIL', f'Expected today realized +9.00 from UTC-day filter, got: {text}'
+    if 'cumulative=+321.50' not in text:
+        return 'FAIL', f'Expected cumulative +321.50 in /pnl output, got: {text}'
+    if 'wins=9 losses=4' not in text:
+        return 'FAIL', f'Expected wins/losses in /pnl output, got: {text}'
+
+    return 'PASS', f'/pnl output validated with today filter and session counters. criteria={"; ".join(criteria)}'
+
+
+def test_30_telegram_trades_default_today_and_last_n_modes() -> tuple[str, str]:
+    criteria = [
+        '/trades with no n returns today-only closed trades (UTC).',
+        '/trades n returns the last n closed trades regardless of day.',
+        'Each row includes symbol, pnl/pnl%, reason, and close timestamp.',
+    ]
+
+    class SinkDispatcher:
+        enabled = True
+
+        def send_message(self, text: str) -> bool:
+            del text
+            return True
+
+    bot, _ = _build_telegram_test_bot(SinkDispatcher(), authorized_chat_id='111')
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    today_a = now.replace(hour=2, minute=10, second=0)
+    today_b = now.replace(hour=11, minute=55, second=0)
+    older = now - datetime.timedelta(days=2)
+
+    _insert_closed_trade_row(bot, 'BTC/USDT:USDT', pnl=10.0, pnl_pct=1.0, reason='trail', close_time_iso=today_a.isoformat())
+    _insert_closed_trade_row(bot, 'ETH/USDT:USDT', pnl=-5.0, pnl_pct=-0.5, reason='stop', close_time_iso=today_b.isoformat())
+    _insert_closed_trade_row(bot, 'SOL/USDT:USDT', pnl=7.0, pnl_pct=0.7, reason='time_exit', close_time_iso=older.isoformat())
+
+    today_text = bot.format_trades_command_text(limit=None, now_utc=now)
+    if 'Trades today (UTC)' not in today_text:
+        return 'FAIL', f'Missing today-mode header: {today_text}'
+    if 'SOL/USDT:USDT' in today_text:
+        return 'FAIL', f'Today-mode should exclude non-today row: {today_text}'
+    if 'BTC/USDT:USDT' not in today_text or 'ETH/USDT:USDT' not in today_text:
+        return 'FAIL', f'Today-mode should include today rows: {today_text}'
+    if 'trail' not in today_text or 'stop' not in today_text:
+        return 'FAIL', f'Expected reason field in today rows: {today_text}'
+
+    last_two = bot.format_trades_command_text(limit=2, now_utc=now)
+    if 'Trades last 2' not in last_two:
+        return 'FAIL', f'Missing last-n header: {last_two}'
+    if 'SOL/USDT:USDT' in last_two:
+        return 'FAIL', f'Expected only most recent 2 rows in last-n mode, got: {last_two}'
+    if 'pnl=' not in last_two or '%' not in last_two:
+        return 'FAIL', f'Expected pnl and pnl% fields in last-n output: {last_two}'
+
+    return 'PASS', f'/trades behavior validated for default and n modes. criteria={"; ".join(criteria)}'
+
+
+def test_31_telegram_pause_resume_manual_gate_and_entry_path_behavior() -> tuple[str, str]:
+    criteria = [
+        '/pause enables manual entry gate while keeping update_positions loop callable.',
+        '/resume clears manual pause and reopens entry path when no other gate is active.',
+        'Manual override timestamp is recorded and returned in operator response.',
+    ]
+
+    class RecordingDispatcher:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.sent_messages: list[str] = []
+
+        def send_message(self, text: str) -> bool:
+            self.sent_messages.append(text)
+            return True
+
+    dispatcher = RecordingDispatcher()
+    bot, persisted_state = _build_telegram_test_bot(dispatcher, authorized_chat_id='111')
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+    pause_result = bot.route_telegram_command('111', '/pause', update_id=1, now_utc=now)
+    if pause_result != 'accepted' or not bot.manual_entry_paused:
+        return 'FAIL', f'/pause should activate manual gate, got result={pause_result}, paused={bot.manual_entry_paused}'
+    if bot.entry_gate_block_reason() != 'manual_pause':
+        return 'FAIL', f'Expected manual_pause gate after /pause, got {bot.entry_gate_block_reason()}'
+    if bot.manual_override_timestamp_utc != now:
+        return 'FAIL', f'Expected manual override timestamp to match command time, got {bot.manual_override_timestamp_utc}'
+
+    called = {'count': 0}
+    pos = PaperPosition('BTC/USDT:USDT', 'long', 100.0, 1.0, datetime.datetime.now())
+    bot.positions = {pos.symbol: pos}
+    bot.analyze_market = lambda symbol, for_entry=False: called.__setitem__('count', called['count'] + 1) or None
+    bot.persist_position = lambda _pos: None
+    bot.close_position = lambda symbol, reason: None
+    bot.update_positions()
+    if called['count'] != 1:
+        return 'FAIL', 'update_positions path should continue running while manual pause is active.'
+
+    resume_time = now + datetime.timedelta(minutes=3)
+    resume_result = bot.route_telegram_command('111', '/resume', update_id=2, now_utc=resume_time)
+    if resume_result != 'accepted' or bot.manual_entry_paused:
+        return 'FAIL', f'/resume should clear manual gate, got result={resume_result}, paused={bot.manual_entry_paused}'
+    if bot.entry_gate_block_reason() is not None:
+        return 'FAIL', f'Expected entry gate open after /resume with no other blockers, got {bot.entry_gate_block_reason()}'
+    if bot.manual_override_timestamp_utc != resume_time:
+        return 'FAIL', f'Expected override timestamp update on /resume, got {bot.manual_override_timestamp_utc}'
+
+    manual_pause_writes = [entry for entry in persisted_state if entry[0] == 'telegram_manual_pause_active']
+    if [value for _, value in manual_pause_writes] != [1, 0]:
+        return 'FAIL', f'Expected pause state persistence writes [1,0], got {manual_pause_writes}'
+    if not any(key == 'telegram_manual_pause_updated_at' for key, _ in persisted_state):
+        return 'FAIL', f'Expected manual override timestamp persistence writes, got {persisted_state}'
+
+    if not any(msg.startswith('Entries paused (new entries only). override_utc=') for msg in dispatcher.sent_messages):
+        return 'FAIL', f'Missing /pause operator response with override timestamp: {dispatcher.sent_messages}'
+    if not any(msg.startswith('Entries resumed. override_utc=') for msg in dispatcher.sent_messages):
+        return 'FAIL', f'Missing /resume operator response with override timestamp: {dispatcher.sent_messages}'
+
+    return 'PASS', f'/pause and /resume gating behavior validated. criteria={"; ".join(criteria)}'
+
+
+def test_32_telegram_confirmation_workflow_ttl_single_use_cancel_and_replay_protection() -> tuple[str, str]:
+    criteria = [
+        'Dangerous commands create pending confirmations and do not execute before YES.',
+        'Non-YES cancels pending action, and YES only executes latest pending action once.',
+        'Expired or canceled pending action cannot execute.',
+    ]
+
+    class RecordingDispatcher:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.sent_messages: list[str] = []
+
+        def send_message(self, text: str) -> bool:
+            self.sent_messages.append(text)
+            return True
+
+    dispatcher = RecordingDispatcher()
+    bot, persisted_state = _build_telegram_test_bot(dispatcher, authorized_chat_id='111')
+    bot.telegram_confirmation_ttl_seconds = 5
+
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    close_calls: list[tuple[str, str]] = []
+    close_all_calls = {'count': 0}
+    shutdown_codes: list[int] = []
+    bot.close_position = lambda symbol, reason: close_calls.append((symbol, reason))
+    bot.close_all_positions_market = lambda: close_all_calls.__setitem__('count', close_all_calls['count'] + 1) or 0
+    bot.request_clean_shutdown = lambda exit_code=0: shutdown_codes.append(int(exit_code))
+
+    bot.route_telegram_command('111', '/close BTC/USDT:USDT', update_id=1, now_utc=now)
+    if close_calls:
+        return 'FAIL', f'Close side effect occurred before YES: close_calls={close_calls}'
+    if not any('Confirm /close BTC/USDT:USDT: reply YES within 5s.' in msg for msg in dispatcher.sent_messages):
+        return 'FAIL', f'Missing confirmation prompt for /close SYMBOL: {dispatcher.sent_messages}'
+
+    bot.route_telegram_command('111', 'no', update_id=2, now_utc=now)
+    if 'Pending action canceled.' not in dispatcher.sent_messages:
+        return 'FAIL', f'Expected cancel message after non-YES reply: {dispatcher.sent_messages}'
+
+    pre_yes_close_all = close_all_calls['count']
+    bot.route_telegram_command('111', 'YES', update_id=3, now_utc=now)
+    if close_all_calls['count'] != pre_yes_close_all:
+        return 'FAIL', f'YES after cancel should not execute side effects, close_all_calls={close_all_calls}'
+    if 'No pending confirmation.' not in dispatcher.sent_messages:
+        return 'FAIL', f'Expected no-pending response on YES replay, got {dispatcher.sent_messages}'
+
+    bot.route_telegram_command('111', '/close all', update_id=4, now_utc=now)
+    bot.route_telegram_command('111', '/kill', update_id=5, now_utc=now)
+    pending = bot.telegram_pending_confirmations.get('111', {})
+    if pending.get('action') != 'kill':
+        return 'FAIL', f'Latest pending action should be kill, got {pending}'
+    if not str(pending.get('nonce') or '').strip():
+        return 'FAIL', f'Expected pending confirmation nonce for replay safety, got {pending}'
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        bot.kill_switch_file = str(Path(temp_dir) / 'kill_switch.flag')
+        bot.route_telegram_command('111', 'YES', update_id=6, now_utc=now)
+        if not Path(bot.kill_switch_file).exists():
+            return 'FAIL', 'Expected /kill YES to write kill switch file.'
+
+    if close_all_calls['count'] != pre_yes_close_all + 1:
+        return 'FAIL', f'Expected exactly one latest-action execution on YES, got close_all_calls={close_all_calls}'
+    if shutdown_codes != [42]:
+        return 'FAIL', f'Expected one shutdown request with exit code 42, got {shutdown_codes}'
+
+    bot.route_telegram_command('111', '/close all', update_id=7, now_utc=now)
+    before_expired_yes = close_all_calls['count']
+    bot.route_telegram_command('111', 'YES', update_id=8, now_utc=now + datetime.timedelta(seconds=6))
+    if close_all_calls['count'] != before_expired_yes:
+        return 'FAIL', f'Expired pending action should not execute, close_all_calls={close_all_calls}'
+    if 'Pending action expired. Re-issue command.' not in dispatcher.sent_messages:
+        return 'FAIL', f'Expected explicit expired confirmation message, got {dispatcher.sent_messages}'
+    if not any(key == 'telegram_pending_confirmations_json' for key, _ in persisted_state):
+        return 'FAIL', f'Expected pending confirmation persistence writes, got {persisted_state}'
+
+    return 'PASS', f'Confirmation TTL/cancel/single-use/replay protections validated. criteria={"; ".join(criteria)}'
+
+
+def test_33_telegram_close_symbol_and_close_all_execute_only_after_yes_with_safe_unknown_symbol() -> tuple[str, str]:
+    criteria = [
+        '/close SYMBOL and /close all execute only after valid YES confirmation.',
+        '/close SYMBOL unknown symbol returns safe error with no side effects.',
+    ]
+
+    class RecordingDispatcher:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.sent_messages: list[str] = []
+
+        def send_message(self, text: str) -> bool:
+            self.sent_messages.append(text)
+            return True
+
+    dispatcher = RecordingDispatcher()
+    bot, _ = _build_telegram_test_bot(dispatcher, authorized_chat_id='111')
+    bot.telegram_confirmation_ttl_seconds = 10
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+    bot.positions = {
+        'BTC/USDT:USDT': object(),
+        'ETH/USDT:USDT': object(),
+    }
+    close_calls: list[tuple[str, str]] = []
+
+    def _close_symbol_stub(symbol: str, reason: str) -> None:
+        close_calls.append((symbol, reason))
+        bot.positions.pop(symbol, None)
+
+    close_all_calls = {'count': 0}
+
+    def _close_all_stub() -> int:
+        close_all_calls['count'] += 1
+        count = len(bot.positions)
+        bot.positions.clear()
+        return count
+
+    bot.close_position = _close_symbol_stub
+    bot.close_all_positions_market = _close_all_stub
+
+    bot.route_telegram_command('111', '/close BTC/USDT:USDT', update_id=1, now_utc=now)
+    if close_calls:
+        return 'FAIL', f'/close SYMBOL executed before YES: close_calls={close_calls}'
+    bot.route_telegram_command('111', 'YES', update_id=2, now_utc=now)
+    if close_calls != [('BTC/USDT:USDT', 'telegram_manual_close')]:
+        return 'FAIL', f'/close SYMBOL YES should call close_position once, got {close_calls}'
+    if not any('Closed position BTC/USDT:USDT.' in msg for msg in dispatcher.sent_messages):
+        return 'FAIL', f'Missing close success response: {dispatcher.sent_messages}'
+
+    prior_calls = list(close_calls)
+    bot.route_telegram_command('111', '/close DOGE/USDT:USDT', update_id=3, now_utc=now)
+    bot.route_telegram_command('111', 'YES', update_id=4, now_utc=now)
+    if close_calls != prior_calls:
+        return 'FAIL', f'Unknown symbol should have no side effects, got close_calls={close_calls}'
+    if not any('Cannot close DOGE/USDT:USDT: no open position.' in msg for msg in dispatcher.sent_messages):
+        return 'FAIL', f'Missing safe unknown-symbol error response: {dispatcher.sent_messages}'
+
+    bot.positions['ETH/USDT:USDT'] = object()
+    bot.route_telegram_command('111', '/close all', update_id=5, now_utc=now)
+    if close_all_calls['count'] != 0:
+        return 'FAIL', f'/close all executed before YES: close_all_calls={close_all_calls}'
+    bot.route_telegram_command('111', 'YES', update_id=6, now_utc=now)
+    if close_all_calls['count'] != 1:
+        return 'FAIL', f'/close all YES should call close_all flow once, got {close_all_calls}'
+
+    bot.positions['ETH/USDT:USDT'] = object()
+    bot.route_telegram_command('111', '/close all', update_id=7, now_utc=now)
+    before_expired_yes = close_all_calls['count']
+    bot.route_telegram_command('111', 'YES', update_id=8, now_utc=now + datetime.timedelta(seconds=11))
+    if close_all_calls['count'] != before_expired_yes:
+        return 'FAIL', f'Expired /close all confirmation should not execute, got {close_all_calls}'
+
+    return 'PASS', f'/close SYMBOL and /close all confirmation-gated execution validated. criteria={"; ".join(criteria)}'
+
+
+def test_34_telegram_kill_executes_only_after_yes_and_requests_exit_42() -> tuple[str, str]:
+    criteria = [
+        '/kill writes kill_switch file only after YES confirmation.',
+        '/kill YES triggers close-all flow and requests shutdown exit code 42.',
+    ]
+
+    class RecordingDispatcher:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.sent_messages: list[str] = []
+
+        def send_message(self, text: str) -> bool:
+            self.sent_messages.append(text)
+            return True
+
+    dispatcher = RecordingDispatcher()
+    bot, _ = _build_telegram_test_bot(dispatcher, authorized_chat_id='111')
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+    close_all_calls = {'count': 0}
+
+    def _close_all_stub() -> int:
+        close_all_calls['count'] += 1
+        return 2
+
+    bot.close_all_positions_market = _close_all_stub
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        kill_file = Path(temp_dir) / 'kill_switch.flag'
+        bot.kill_switch_file = str(kill_file)
+
+        bot.route_telegram_command('111', '/kill', update_id=1, now_utc=now)
+        if kill_file.exists():
+            return 'FAIL', '/kill should not write file before YES confirmation.'
+        if close_all_calls['count'] != 0:
+            return 'FAIL', f'/kill should not trigger close-all before YES, got {close_all_calls}'
+        if bot.shutdown_requested or bot.shutdown_exit_code != 0:
+            return 'FAIL', f'/kill should not request shutdown before YES, got requested={bot.shutdown_requested} code={bot.shutdown_exit_code}'
+
+        bot.route_telegram_command('111', 'YES', update_id=2, now_utc=now)
+        if not kill_file.exists():
+            return 'FAIL', '/kill YES did not write kill switch file.'
+        if close_all_calls['count'] != 1:
+            return 'FAIL', f'/kill YES should call close-all once, got {close_all_calls}'
+        if not bot.shutdown_requested or bot.shutdown_exit_code != 42:
+            return 'FAIL', f'/kill YES should request shutdown code 42, got requested={bot.shutdown_requested} code={bot.shutdown_exit_code}'
+
+        bot.route_telegram_command('111', 'YES', update_id=3, now_utc=now)
+        if close_all_calls['count'] != 1:
+            return 'FAIL', f'Replay YES should not re-execute kill action, got {close_all_calls}'
+
+    return 'PASS', f'/kill confirmation-gated flow validated. criteria={"; ".join(criteria)}'
+
+
+def test_35_telegram_config_read_only_allowlist_and_secret_safety() -> tuple[str, str]:
+    criteria = [
+        '/config is read-only and returns only mode, leverage buckets, position cap, and stop %.',
+        '/config output excludes secrets, API keys, bot token, chat id, and raw environment secret values.',
+        '/config output reflects current runtime values for listed fields.',
+    ]
+
+    class RecordingDispatcher:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.sent_messages: list[str] = []
+
+        def send_message(self, text: str) -> bool:
+            self.sent_messages.append(text)
+            return True
+
+    dispatcher = RecordingDispatcher()
+    bot, _ = _build_telegram_test_bot(dispatcher, authorized_chat_id='111')
+    bot.bot_mode = 'shadow'
+    bot.major_leverage = 6.0
+    bot.large_alt_leverage = 4.0
+    bot.mid_cap_leverage = 2.5
+    bot.default_leverage = 1.5
+    bot.max_open_positions = 7
+
+    secret_env_values = {
+        'BYBIT_READ_API_KEY': 'READ_KEY_SECRET_ABC123',
+        'BYBIT_READ_API_SECRET': 'READ_SECRET_DEF456',
+        'BYBIT_TRADE_API_KEY': 'TRADE_KEY_SECRET_GHI789',
+        'BYBIT_TRADE_API_SECRET': 'TRADE_SECRET_JKL012',
+        'TELEGRAM_BOT_TOKEN': 'TG_TOKEN_MNO345',
+        'TELEGRAM_CHAT_ID': '111',
+    }
+    old_env = {key: os.environ.get(key) for key in secret_env_values}
+    for key, value in secret_env_values.items():
+        os.environ[key] = value
+
+    try:
+        result = bot.route_telegram_command(
+            chat_id='111',
+            text='/config',
+            update_id=1,
+            now_utc=datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc),
+        )
+        if result != 'accepted':
+            return 'FAIL', f'Expected /config command acceptance, got result={result}'
+        if not dispatcher.sent_messages:
+            return 'FAIL', 'Expected /config response message to be sent.'
+
+        text = dispatcher.sent_messages[-1]
+        if not text.startswith('Config (read-only)\n'):
+            return 'FAIL', f'Expected read-only header, got: {text}'
+        if 'mode=shadow' not in text:
+            return 'FAIL', f'Expected mode from runtime values, got: {text}'
+        if 'leverage_buckets=major:6.00x large_alt:4.00x mid_cap:2.50x default:1.50x' not in text:
+            return 'FAIL', f'Expected leverage buckets from runtime values, got: {text}'
+        if 'position_cap=7' not in text:
+            return 'FAIL', f'Expected position cap from runtime values, got: {text}'
+        if 'stop_pct=2.50%' not in text:
+            return 'FAIL', f'Expected stop percent field, got: {text}'
+
+        forbidden_tokens = [
+            'api',
+            'secret',
+            'token',
+            'chat_id',
+            'bybit_read_api_key',
+            'bybit_read_api_secret',
+            'bybit_trade_api_key',
+            'bybit_trade_api_secret',
+            'telegram_bot_token',
+            'telegram_chat_id',
+        ]
+        lowered_text = text.lower()
+        for token in forbidden_tokens:
+            if token in lowered_text:
+                return 'FAIL', f'/config leaked forbidden token {token!r}: {text}'
+
+        for _, secret_value in secret_env_values.items():
+            if secret_value in text:
+                return 'FAIL', f'/config leaked raw env value {secret_value!r}: {text}'
+    finally:
+        for key, prior in old_env.items():
+            if prior is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prior
+
+    return 'PASS', f'/config allowlist and secret-safety checks validated. criteria={"; ".join(criteria)}'
+
+
+def test_36_telegram_command_observability_event_emission() -> tuple[str, str]:
+    criteria = [
+        'Router emits telegram_command_received for inbound messages.',
+        'Router emits telegram_command_rejected for unauthorized and invalid syntax paths.',
+        'Router emits telegram_command_executed for successful command handling.',
+        'Dangerous command staging emits telegram_command_confirmation_required.',
+    ]
+
+    class RecordingDispatcher:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.sent_messages: list[str] = []
+
+        def send_message(self, text: str) -> bool:
+            self.sent_messages.append(text)
+            return True
+
+    dispatcher = RecordingDispatcher()
+    bot, _ = _build_telegram_test_bot(dispatcher, authorized_chat_id='111')
+    now = datetime.datetime(2026, 3, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    captured_events: list[str] = []
+
+    def _capture_event(_level: str, event_type: str, _component: str, _message: str, symbol=None, values=None):
+        del symbol
+        del values
+        captured_events.append(event_type)
+
+    bot.emit_structured_event = _capture_event
+
+    bot.route_telegram_command('111', '/status', update_id=1, now_utc=now)
+    bot.route_telegram_command('999', '/status', update_id=2, now_utc=now)
+    bot.route_telegram_command('111', '/notreal', update_id=3, now_utc=now)
+    bot.route_telegram_command('111', '/close all', update_id=4, now_utc=now)
+
+    required = {
+        'telegram_command_received',
+        'telegram_command_rejected',
+        'telegram_command_executed',
+        'telegram_command_confirmation_required',
+    }
+    missing = required.difference(set(captured_events))
+    if missing:
+        return 'FAIL', f'Missing expected observability events {sorted(missing)} from {captured_events}'
+
+    return 'PASS', f'Telegram command observability events validated. criteria={"; ".join(criteria)}'
+
+
+def test_37_telegram_restart_rehydrates_pause_offset_and_pending_confirmation() -> tuple[str, str]:
+    criteria = [
+        'Telegram manual pause state is restored from bot_state on restart.',
+        'Telegram last update offset is restored from bot_state on restart.',
+        'Pending confirmations are rehydrated with nonce when still unexpired.',
+    ]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / 'telegram_restart.db'
+        writer = None
+        reader = None
+
+        try:
+            writer = Aribot.__new__(Aribot)
+            writer.logger = LOGGER
+            writer.db = sqlite3.connect(str(db_path), detect_types=sqlite3.PARSE_DECLTYPES)
+            writer.db.row_factory = sqlite3.Row
+            writer.setup_database()
+
+            now = datetime.datetime.now(datetime.timezone.utc)
+            pending_payload = {
+                '111': {
+                    'action': 'close_all',
+                    'args': {},
+                    'created_at_utc': now.isoformat(),
+                    'expires_at_utc': (now + datetime.timedelta(minutes=2)).isoformat(),
+                    'nonce': 'nonce-restart-proof-001',
+                }
+            }
+            writer.set_state_value('telegram_last_update_id', 77)
+            writer.set_state_value('telegram_manual_pause_active', 1)
+            writer.set_state_value('telegram_manual_pause_updated_at', now.isoformat())
+            writer.set_state_value('telegram_pending_confirmations_json', json.dumps(pending_payload))
+            writer.db.close()
+            writer = None
+
+            reader = Aribot.__new__(Aribot)
+            reader.logger = LOGGER
+            reader.initial_balance = 10000.0
+            reader.telegram_last_update_id = 0
+            reader.manual_entry_paused = False
+            reader.manual_override_timestamp_utc = None
+            reader.telegram_pending_confirmations = {}
+            reader.db = sqlite3.connect(str(db_path), detect_types=sqlite3.PARSE_DECLTYPES)
+            reader.db.row_factory = sqlite3.Row
+            reader.load_state()
+
+            if reader.telegram_last_update_id != 77:
+                return 'FAIL', f'Expected telegram_last_update_id=77 after reload, got {reader.telegram_last_update_id}'
+            if not reader.manual_entry_paused:
+                return 'FAIL', 'Expected manual_entry_paused to be restored as True after reload.'
+            if reader.manual_override_timestamp_utc is None:
+                return 'FAIL', 'Expected manual override timestamp to be restored after reload.'
+
+            pending = reader.telegram_pending_confirmations.get('111', {})
+            if pending.get('action') != 'close_all':
+                return 'FAIL', f'Expected rehydrated pending action close_all, got {pending}'
+            if str(pending.get('nonce') or '') != 'nonce-restart-proof-001':
+                return 'FAIL', f'Expected rehydrated nonce to match persisted value, got {pending}'
+        finally:
+            if reader is not None:
+                with contextlib.suppress(Exception):
+                    reader.db.close()
+            if writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.db.close()
+
+    return 'PASS', f'Restart rehydration validated. criteria={"; ".join(criteria)}'
+
+
 def test_21_branch_a_testnet_price_based_pnl_from_entry_and_ticker() -> tuple[str, str]:
     criteria = [
         'Use real Bybit testnet position and ticker APIs when credentials exist.',
@@ -2053,6 +2945,19 @@ def main() -> int:
         (22, 'Branch A restart reconciliation ignores margin percentage fields and avoids false stop', test_22_branch_a_restart_reconcile_ignores_margin_pct_no_false_stop),
         (23, 'Branch C testnet leverage acceptance via entry flow', test_23_branch_c_testnet_leverage_acceptance),
         (24, 'Branch B testnet native stop round-trip with real API', test_24_branch_b_testnet_native_stop_round_trip),
+        (25, 'Telegram transport getUpdates offset progression', test_25_telegram_transport_get_updates_offset_progression),
+        (26, 'Telegram poll non-blocking plus strict parser/auth gate', test_26_telegram_poll_non_blocking_and_strict_parser_auth_gate),
+        (27, 'Telegram /status runtime snapshot output and cooldown state', test_27_telegram_status_runtime_snapshot_fields_and_cooldown_state),
+        (28, 'Telegram /positions output for empty and multi-position cases', test_28_telegram_positions_output_empty_and_multi_position_rows),
+        (29, 'Telegram /pnl output from today closed trades plus session totals', test_29_telegram_pnl_uses_today_closed_trades_and_session_metrics),
+        (30, 'Telegram /trades default today mode and /trades n mode behavior', test_30_telegram_trades_default_today_and_last_n_modes),
+        (31, 'Telegram /pause and /resume manual entry gate behavior', test_31_telegram_pause_resume_manual_gate_and_entry_path_behavior),
+        (32, 'Telegram dangerous-command YES confirmation TTL/cancel/replay workflow', test_32_telegram_confirmation_workflow_ttl_single_use_cancel_and_replay_protection),
+        (33, 'Telegram /close SYMBOL and /close all execute only after YES', test_33_telegram_close_symbol_and_close_all_execute_only_after_yes_with_safe_unknown_symbol),
+        (34, 'Telegram /kill executes only after YES and requests exit code 42', test_34_telegram_kill_executes_only_after_yes_and_requests_exit_42),
+        (35, 'Telegram /config read-only allowlist and secret safety', test_35_telegram_config_read_only_allowlist_and_secret_safety),
+        (36, 'Telegram command observability event emission', test_36_telegram_command_observability_event_emission),
+        (37, 'Telegram restart rehydrates pause/offset/pending state', test_37_telegram_restart_rehydrates_pause_offset_and_pending_confirmation),
     ]
 
     criteria_map = {
@@ -2154,6 +3059,52 @@ def main() -> int:
             'Open a tiny real testnet position using configured symbol/qty and valid trade credentials.',
             'Set native stop-loss with set_trading_stop and verify it appears via fetch_positions.',
             'Clear native stop fields, close position, and verify no open position remains.',
+        ],
+        25: [
+            'Mock Telegram getUpdates API response with multiple update IDs.',
+            'Verify structured transport payload and replay-safe next_offset progression.',
+        ],
+        26: [
+            'Simulate polling failure and verify warning-only non-blocking behavior.',
+            'Verify strict parser and authorization gate behavior for approved/invalid commands.',
+            'Verify per-update telegram_last_update_id persistence during polling.',
+        ],
+        27: [
+            'Build /status runtime snapshot with required fields from spec.',
+            'Validate cooldown active/inactive behavior from cooldown_until_utc.',
+        ],
+        28: [
+            'Validate explicit empty-state response for /positions when no open positions exist.',
+            'Validate per-position output includes symbol, side, entry, current price, pnl%, and trail active.',
+        ],
+        29: [
+            'Seed in-memory closed_trades rows across UTC day boundary.',
+            'Validate /pnl today realized filter and cumulative/session metrics output.',
+        ],
+        30: [
+            'Validate /trades with omitted n returns UTC-today trades only.',
+            'Validate /trades n returns last n trades with pnl/pnl%/reason/timestamp fields.',
+        ],
+        31: [
+            'Validate /pause toggles manual entry gate and records override timestamp.',
+            'Validate /resume clears manual gate while update_positions remains operational.',
+        ],
+        32: [
+            'Issue dangerous commands and verify pending confirmations are created with TTL.',
+            'Verify non-YES cancels pending action, YES executes latest action once, and replay YES is blocked.',
+        ],
+        33: [
+            'Verify /close SYMBOL and /close all do not execute before YES.',
+            'Verify unknown symbol path is safe with no side effects.',
+        ],
+        34: [
+            'Verify /kill only executes after YES by writing kill switch file.',
+            'Verify kill flow triggers close-all and clean shutdown request with exit code 42.',
+        ],
+        35: [
+            'Verify /config response is read-only and includes only mode, leverage buckets, position cap, and stop %.',
+            'Verify /config response excludes secrets, API keys, bot token, chat id, and raw env secret values.',
+            'Verify /config reported values match live runtime values for listed fields.',
         ],
     }
 

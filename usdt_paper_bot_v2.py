@@ -240,6 +240,10 @@ class Aribot:
         self.daily_drawdown_paused = False
         self.consecutive_losses = 0
         self.cooldown_until_utc = None
+        self.manual_entry_paused = False
+        self.manual_override_timestamp_utc = None
+        self.loop_cycle_count = 0
+        self.last_regime_signal = 'UNKNOWN'
         self.tick_observations = {}
         self.timestamp_fallback_warned = set()
 
@@ -255,6 +259,16 @@ class Aribot:
         self.shutdown_exit_code = 0
         self.run_id = uuid.uuid4().hex[:12]
         self.alert_dispatcher = AlertDispatcher(logger=self.logger)
+        self.telegram_chat_id = str(getattr(self.alert_dispatcher, 'chat_id', '') or '').strip()
+        self.telegram_last_update_id = 0
+        try:
+            self.telegram_confirmation_ttl_seconds = max(
+                5,
+                int(str(os.getenv('TELEGRAM_CONFIRMATION_TTL_SECONDS', '90')).strip()),
+            )
+        except (TypeError, ValueError):
+            self.telegram_confirmation_ttl_seconds = 90
+        self.telegram_pending_confirmations = {}
         self.structured_logger = StructuredEventLogger('observability.jsonl', self.run_id)
         self.funding_tracker = FundingTracker(self.exchange, self.db, self.emit_structured_event, self.run_id)
         self.funding_tracker.ensure_schema()
@@ -701,6 +715,15 @@ class Aribot:
             return False
         return datetime.datetime.now(datetime.timezone.utc) < self.cooldown_until_utc
 
+    def entry_gate_block_reason(self):
+        if self.manual_entry_paused:
+            return 'manual_pause'
+        if self.daily_drawdown_paused:
+            return 'daily_drawdown_pause'
+        if self.in_loss_cooldown():
+            return 'loss_cooldown'
+        return None
+
     def _normalize_symbol_set(self, symbols):
         normalized = set()
         if not isinstance(symbols, list):
@@ -917,6 +940,618 @@ class Aribot:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def supported_telegram_commands_help_text():
+        return (
+            'Invalid command format. Use one of: '
+            '/status, /positions, /pnl, /trades [n], /pause, /resume, '
+            '/close SYMBOL, /close all, /kill, /config'
+        )
+
+    def is_authorized_chat(self, chat_id):
+        expected = str(self.telegram_chat_id or '').strip()
+        candidate = str(chat_id or '').strip()
+        return bool(expected and candidate and expected == candidate)
+
+    def parse_telegram_command(self, text):
+        if not isinstance(text, str):
+            return {'ok': False, 'error': 'invalid_command'}
+
+        raw = text.strip()
+        if not raw:
+            return {'ok': False, 'error': 'invalid_command'}
+
+        lowered = raw.lower()
+        if lowered in {'/status', '/positions', '/pnl', '/pause', '/resume', '/kill', '/config'}:
+            return {'ok': True, 'command': lowered, 'args': {}}
+
+        if lowered == '/trades':
+            return {'ok': True, 'command': '/trades', 'args': {'limit': None}}
+        if lowered.startswith('/trades '):
+            tokens = raw.split()
+            if len(tokens) != 2:
+                return {'ok': False, 'error': 'invalid_command'}
+            try:
+                limit = int(tokens[1])
+            except (TypeError, ValueError):
+                return {'ok': False, 'error': 'invalid_command'}
+            if limit <= 0:
+                return {'ok': False, 'error': 'invalid_command'}
+            return {'ok': True, 'command': '/trades', 'args': {'limit': limit}}
+
+        if lowered == '/close all':
+            return {'ok': True, 'command': '/close_all', 'args': {}}
+
+        if lowered.startswith('/close '):
+            tokens = raw.split()
+            if len(tokens) != 2:
+                return {'ok': False, 'error': 'invalid_command'}
+            symbol = tokens[1].strip()
+            if not symbol or symbol.lower() == 'all':
+                return {'ok': False, 'error': 'invalid_command'}
+            return {'ok': True, 'command': '/close_symbol', 'args': {'symbol': symbol}}
+
+        return {'ok': False, 'error': 'invalid_command'}
+
+    @staticmethod
+    def _safe_utc_from_iso(raw_value):
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            return None
+        try:
+            parsed = datetime.datetime.fromisoformat(raw_value)
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.astimezone(datetime.timezone.utc)
+
+    def _ensure_pending_confirmation_store(self):
+        store = getattr(self, 'telegram_pending_confirmations', None)
+        if not isinstance(store, dict):
+            store = {}
+            self.telegram_pending_confirmations = store
+        return store
+
+    def _pending_confirmation_ttl_seconds(self):
+        raw = getattr(self, 'telegram_confirmation_ttl_seconds', 90)
+        try:
+            ttl = int(raw)
+        except (TypeError, ValueError):
+            ttl = 90
+        return max(5, ttl)
+
+    def _persist_pending_confirmations(self):
+        payload = {}
+        for chat_id, pending in self._ensure_pending_confirmation_store().items():
+            if not isinstance(pending, dict):
+                continue
+
+            action = str(pending.get('action') or '').strip()
+            expires_at = str(pending.get('expires_at_utc') or '').strip()
+            if not action or not expires_at:
+                continue
+
+            payload[str(chat_id)] = {
+                'action': action,
+                'args': pending.get('args') if isinstance(pending.get('args'), dict) else {},
+                'created_at_utc': str(pending.get('created_at_utc') or '').strip(),
+                'expires_at_utc': expires_at,
+                'nonce': str(pending.get('nonce') or '').strip(),
+            }
+
+        self.set_state_value('telegram_pending_confirmations_json', json.dumps(payload, separators=(',', ':')))
+
+    def _build_pending_confirmation(self, chat_id, action, args, now_utc=None):
+        now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        expires_at = now + datetime.timedelta(seconds=self._pending_confirmation_ttl_seconds())
+        pending = {
+            'chat_id': str(chat_id or '').strip(),
+            'action': str(action or '').strip(),
+            'args': dict(args or {}),
+            'created_at_utc': now.isoformat(),
+            'expires_at_utc': expires_at.isoformat(),
+            'nonce': uuid.uuid4().hex,
+        }
+        store = self._ensure_pending_confirmation_store()
+        store[pending['chat_id']] = pending
+        self._persist_pending_confirmations()
+        return pending
+
+    def _clear_pending_confirmation(self, chat_id):
+        chat_key = str(chat_id or '').strip()
+        store = self._ensure_pending_confirmation_store()
+        removed = chat_key in store
+        if removed:
+            store.pop(chat_key, None)
+            self._persist_pending_confirmations()
+        return removed
+
+    def _get_pending_confirmation(self, chat_id, now_utc=None):
+        chat_key = str(chat_id or '').strip()
+        pending = self._ensure_pending_confirmation_store().get(chat_key)
+        if not isinstance(pending, dict):
+            return None
+
+        expires_at = self._safe_utc_from_iso(pending.get('expires_at_utc'))
+        now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        if expires_at is None or now >= expires_at:
+            self._clear_pending_confirmation(chat_key)
+            return None
+        return pending
+
+    def _build_confirmation_prompt(self, pending):
+        action = str((pending or {}).get('action') or '').strip()
+        args = (pending or {}).get('args') if isinstance((pending or {}).get('args'), dict) else {}
+        ttl = self._pending_confirmation_ttl_seconds()
+
+        if action == 'close_symbol':
+            symbol = str(args.get('symbol') or '').strip()
+            return f'Confirm /close {symbol}: reply YES within {ttl}s.'
+        if action == 'close_all':
+            return f'Confirm /close all: reply YES within {ttl}s.'
+        if action == 'kill':
+            return f'Confirm /kill: reply YES within {ttl}s.'
+        return f'Confirm action: reply YES within {ttl}s.'
+
+    def _execute_confirmed_telegram_action(self, pending):
+        action = str((pending or {}).get('action') or '').strip()
+        args = (pending or {}).get('args') if isinstance((pending or {}).get('args'), dict) else {}
+
+        if action == 'close_symbol':
+            symbol = str(args.get('symbol') or '').strip()
+            if not symbol or symbol not in self.positions:
+                self.alert_dispatcher.send_message(f'Cannot close {symbol or "<unknown>"}: no open position.')
+                return 'safe_error'
+
+            self.close_position(symbol, 'telegram_manual_close')
+            if symbol in self.positions:
+                self.alert_dispatcher.send_message(f'Close request for {symbol} did not complete.')
+                self._emit_telegram_command_event(
+                    'WARNING',
+                    'telegram_command_executed',
+                    'Confirmed close-symbol command did not complete.',
+                    values={'command': '/close SYMBOL', 'symbol': symbol, 'result': 'failed'},
+                )
+                return 'failed'
+
+            self.alert_dispatcher.send_message(f'Closed position {symbol}.')
+            self._emit_telegram_command_event(
+                'INFO',
+                'telegram_command_executed',
+                'Confirmed close-symbol command executed.',
+                values={'command': '/close SYMBOL', 'symbol': symbol, 'result': 'accepted'},
+            )
+            return 'accepted'
+
+        if action == 'close_all':
+            requested = self.close_all_positions_market()
+            remaining = len(self.positions)
+            self.alert_dispatcher.send_message(
+                f'Close-all completed. requested={requested} remaining={remaining}.'
+            )
+            self._emit_telegram_command_event(
+                'INFO',
+                'telegram_command_executed',
+                'Confirmed close-all command executed.',
+                values={'command': '/close all', 'requested': requested, 'remaining': remaining},
+            )
+            return 'accepted'
+
+        if action == 'kill':
+            kill_path = Path(self.kill_switch_file)
+            if kill_path.parent and str(kill_path.parent) not in {'', '.'}:
+                kill_path.parent.mkdir(parents=True, exist_ok=True)
+            kill_path.write_text('telegram_kill\n', encoding='utf-8')
+            requested = self.close_all_positions_market()
+            self.request_clean_shutdown(exit_code=42)
+            self.alert_dispatcher.send_message(
+                f'Kill confirmed. flag={kill_path} close_all_requested={requested} shutdown_exit_code=42.'
+            )
+            self._emit_telegram_command_event(
+                'CRITICAL',
+                'telegram_command_executed',
+                'Confirmed kill command executed.',
+                values={'command': '/kill', 'flag': str(kill_path), 'close_all_requested': requested, 'exit_code': 42},
+            )
+            return 'accepted'
+
+        self.alert_dispatcher.send_message('No executable pending action found.')
+        return 'safe_error'
+
+    def _emit_telegram_command_event(self, level, event_type, message, symbol=None, values=None):
+        emitter = getattr(self, 'emit_structured_event', None)
+        if callable(emitter):
+            emitter(level, event_type, 'telegram', message, symbol=symbol, values=values or {})
+
+    def _handle_confirmation_gate(self, chat_id, text, now_utc=None):
+        now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        normalized = str(text or '').strip()
+        normalized_upper = normalized.upper()
+        chat_key = str(chat_id or '').strip()
+
+        pending = self._ensure_pending_confirmation_store().get(chat_key)
+        if isinstance(pending, dict):
+            expires_at = self._safe_utc_from_iso(pending.get('expires_at_utc'))
+            if expires_at is None or now >= expires_at:
+                self._clear_pending_confirmation(chat_key)
+                if normalized_upper == 'YES':
+                    self.alert_dispatcher.send_message('Pending action expired. Re-issue command.')
+                    self._emit_telegram_command_event(
+                        'WARNING',
+                        'telegram_command_confirmation_expired',
+                        'Pending confirmation expired before YES reply.',
+                        values={'chat_id': chat_key},
+                    )
+                    return 'handled'
+                pending = None
+        else:
+            pending = None
+
+        if pending is None:
+            if normalized_upper == 'YES':
+                self.alert_dispatcher.send_message('No pending confirmation.')
+                self._emit_telegram_command_event(
+                    'INFO',
+                    'telegram_command_confirmation_missing',
+                    'YES received with no pending confirmation.',
+                    values={'chat_id': chat_key},
+                )
+                return 'handled'
+            return 'pass'
+
+        # Allow command messages to route normally so a new dangerous command
+        # can replace the current pending action.
+        if normalized.startswith('/'):
+            return 'pass'
+
+        if normalized_upper != 'YES':
+            self._clear_pending_confirmation(chat_id)
+            self.alert_dispatcher.send_message('Pending action canceled.')
+            self._emit_telegram_command_event(
+                'INFO',
+                'telegram_command_confirmation_canceled',
+                'Pending confirmation canceled by non-YES reply.',
+                values={'chat_id': chat_key},
+            )
+            return 'handled'
+
+        self._clear_pending_confirmation(chat_id)
+        self._emit_telegram_command_event(
+            'INFO',
+            'telegram_command_confirmation_accepted',
+            'Pending confirmation accepted with YES.',
+            values={'chat_id': chat_key, 'action': str(pending.get('action') or '')},
+        )
+        self._execute_confirmed_telegram_action(pending)
+        return 'handled'
+
+    def _compute_session_drawdown_pct(self):
+        if self.session_start_balance <= 0:
+            return 0.0
+        return ((self.current_balance - self.session_start_balance) / self.session_start_balance) * 100.0
+
+    def build_runtime_status_snapshot(self, now_utc=None):
+        ref_now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        cooldown_active = bool(self.cooldown_until_utc and ref_now < self.cooldown_until_utc)
+        cooldown_until = None
+        if self.cooldown_until_utc is not None:
+            cooldown_until = self.cooldown_until_utc.isoformat()
+
+        return {
+            'mode': str(self.bot_mode or 'unknown'),
+            'regime_direction': str(self.last_regime_signal or 'UNKNOWN'),
+            'session_pnl': float(self.current_balance - self.session_start_balance),
+            'cycle_count': int(self.loop_cycle_count),
+            'drawdown_pct': float(self._compute_session_drawdown_pct()),
+            'cooldown_active': bool(cooldown_active),
+            'cooldown_until_utc': cooldown_until,
+        }
+
+    def format_status_command_text(self, now_utc=None):
+        snap = self.build_runtime_status_snapshot(now_utc=now_utc)
+        if snap['cooldown_active'] and snap['cooldown_until_utc']:
+            cooldown_text = f"active until {snap['cooldown_until_utc']}"
+        else:
+            cooldown_text = 'inactive'
+
+        return (
+            'Status\n'
+            f"mode={snap['mode']} regime={snap['regime_direction']} cycle={snap['cycle_count']}\n"
+            f"session_pnl={snap['session_pnl']:+.2f} drawdown={snap['drawdown_pct']:+.2f}%\n"
+            f"cooldown={cooldown_text}"
+        )
+
+    def format_positions_command_text(self):
+        if not self.positions:
+            return 'No open positions.'
+
+        lines = ['Positions']
+        for symbol in sorted(self.positions.keys()):
+            pos = self.positions[symbol]
+            trail_active = 'yes' if pos.trailing_stop_active else 'no'
+            lines.append(
+                f"{symbol} {pos.side} e={pos.entry_price:.4f} px={pos.current_price:.4f} "
+                f"pnl={pos.pnl_percentage:+.2f}% trail={trail_active}"
+            )
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _utc_today_iso(now_utc=None):
+        ts = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        return ts.date().isoformat()
+
+    def fetch_closed_trades_rows(self, limit=None, today_only=False, now_utc=None):
+        cursor = self.db.cursor()
+        query = (
+            'SELECT symbol, pnl, pnl_percentage, reason, close_time '
+            'FROM closed_trades'
+        )
+        params = []
+        if today_only:
+            query += ' WHERE substr(close_time, 1, 10) = ?'
+            params.append(self._utc_today_iso(now_utc=now_utc))
+        query += ' ORDER BY close_time DESC'
+        if limit is not None:
+            query += ' LIMIT ?'
+            params.append(int(limit))
+
+        return cursor.execute(query, tuple(params)).fetchall()
+
+    def get_today_realized_pnl(self, now_utc=None):
+        cursor = self.db.cursor()
+        row = cursor.execute(
+            'SELECT COALESCE(SUM(pnl), 0.0) AS today_realized FROM closed_trades WHERE substr(close_time, 1, 10) = ?',
+            (self._utc_today_iso(now_utc=now_utc),),
+        ).fetchone()
+        if not row:
+            return 0.0
+        return float(row['today_realized'] or 0.0)
+
+    def format_pnl_command_text(self, now_utc=None):
+        today_realized = self.get_today_realized_pnl(now_utc=now_utc)
+        return (
+            'PnL\n'
+            f'today_realized={today_realized:+.2f} cumulative={self.total_pnl:+.2f}\n'
+            f'wins={self.winning_trades} losses={self.losing_trades}'
+        )
+
+    def format_trades_command_text(self, limit=None, now_utc=None):
+        today_only = limit is None
+        rows = self.fetch_closed_trades_rows(limit=limit, today_only=today_only, now_utc=now_utc)
+        if not rows:
+            if today_only:
+                return 'No closed trades today (UTC).'
+            return 'No closed trades found.'
+
+        if today_only:
+            lines = ['Trades today (UTC)']
+        else:
+            lines = [f'Trades last {int(limit)}']
+
+        for row in rows:
+            close_time = str(row['close_time'] or '')
+            ts = close_time.replace('T', ' ')[:19] if close_time else 'n/a'
+            lines.append(
+                f"{ts} {row['symbol']} pnl={float(row['pnl'] or 0.0):+.2f} "
+                f"({float(row['pnl_percentage'] or 0.0):+.2f}%) {row['reason']}"
+            )
+
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _operator_stop_pct_config_value():
+        # Keep /config output aligned to the strategy-level hard stop threshold.
+        return 2.5
+
+    def build_safe_config_snapshot(self):
+        return {
+            'mode': str(self.bot_mode or 'unknown'),
+            'leverage_buckets': {
+                'major': float(self.major_leverage),
+                'large_alt': float(self.large_alt_leverage),
+                'mid_cap': float(self.mid_cap_leverage),
+                'default': float(self.default_leverage),
+            },
+            'position_cap': int(self.max_open_positions),
+            'stop_pct': float(self._operator_stop_pct_config_value()),
+        }
+
+    def format_config_command_text(self):
+        snap = self.build_safe_config_snapshot()
+        buckets = snap['leverage_buckets']
+        return (
+            'Config (read-only)\n'
+            f"mode={snap['mode']}\n"
+            f"leverage_buckets=major:{buckets['major']:.2f}x "
+            f"large_alt:{buckets['large_alt']:.2f}x "
+            f"mid_cap:{buckets['mid_cap']:.2f}x "
+            f"default:{buckets['default']:.2f}x\n"
+            f"position_cap={snap['position_cap']} stop_pct={snap['stop_pct']:.2f}%"
+        )
+
+    def set_manual_entry_pause(self, pause_enabled, now_utc=None):
+        now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        self.manual_entry_paused = bool(pause_enabled)
+        self.manual_override_timestamp_utc = now
+        self.set_state_value('telegram_manual_pause_active', 1 if self.manual_entry_paused else 0)
+        self.set_state_value('telegram_manual_pause_updated_at', now.isoformat())
+        action = 'pause' if self.manual_entry_paused else 'resume'
+        self.logger.warning(
+            '⚙️ Manual entry override: action=%s timestamp_utc=%s',
+            action,
+            now.isoformat(),
+        )
+        return now.isoformat()
+
+    def route_telegram_command(self, chat_id, text, update_id, now_utc):
+        self._emit_telegram_command_event(
+            'INFO',
+            'telegram_command_received',
+            'Telegram command received.',
+            values={'chat_id': str(chat_id or ''), 'text': str(text or ''), 'update_id': update_id},
+        )
+
+        if not self.is_authorized_chat(chat_id):
+            self.alert_dispatcher.send_message('Unauthorized chat.')
+            self._emit_telegram_command_event(
+                'WARNING',
+                'telegram_command_rejected',
+                'Telegram command rejected due to unauthorized chat.',
+                values={'chat_id': str(chat_id or ''), 'update_id': update_id},
+            )
+            return 'unauthorized'
+
+        gate_result = self._handle_confirmation_gate(chat_id=chat_id, text=text, now_utc=now_utc)
+        if gate_result == 'handled':
+            return 'accepted'
+
+        parsed = self.parse_telegram_command(text)
+        if not parsed.get('ok'):
+            self.alert_dispatcher.send_message(self.supported_telegram_commands_help_text())
+            self._emit_telegram_command_event(
+                'INFO',
+                'telegram_command_rejected',
+                'Telegram command rejected due to invalid syntax.',
+                values={'chat_id': str(chat_id or ''), 'text': str(text or ''), 'update_id': update_id},
+            )
+            return 'invalid'
+
+        command = parsed['command']
+        args = parsed.get('args', {})
+        if command == '/status':
+            self.alert_dispatcher.send_message(self.format_status_command_text(now_utc=now_utc))
+            self._emit_telegram_command_event('INFO', 'telegram_command_executed', 'Status command executed.', values={'command': '/status', 'update_id': update_id})
+            return 'accepted'
+        if command == '/positions':
+            self.alert_dispatcher.send_message(self.format_positions_command_text())
+            self._emit_telegram_command_event('INFO', 'telegram_command_executed', 'Positions command executed.', values={'command': '/positions', 'update_id': update_id})
+            return 'accepted'
+        if command == '/pnl':
+            self.alert_dispatcher.send_message(self.format_pnl_command_text(now_utc=now_utc))
+            self._emit_telegram_command_event('INFO', 'telegram_command_executed', 'PnL command executed.', values={'command': '/pnl', 'update_id': update_id})
+            return 'accepted'
+        if command == '/trades':
+            limit = args.get('limit')
+            self.alert_dispatcher.send_message(self.format_trades_command_text(limit=limit, now_utc=now_utc))
+            self._emit_telegram_command_event('INFO', 'telegram_command_executed', 'Trades command executed.', values={'command': '/trades', 'limit': limit, 'update_id': update_id})
+            return 'accepted'
+        if command == '/config':
+            self.alert_dispatcher.send_message(self.format_config_command_text())
+            self._emit_telegram_command_event('INFO', 'telegram_command_executed', 'Config command executed.', values={'command': '/config', 'update_id': update_id})
+            return 'accepted'
+        if command == '/pause':
+            override_ts = self.set_manual_entry_pause(True, now_utc=now_utc)
+            self.alert_dispatcher.send_message(
+                f'Entries paused (new entries only). override_utc={override_ts}'
+            )
+            self._emit_telegram_command_event('INFO', 'telegram_command_executed', 'Pause command executed.', values={'command': '/pause', 'override_utc': override_ts, 'update_id': update_id})
+            return 'accepted'
+        if command == '/resume':
+            override_ts = self.set_manual_entry_pause(False, now_utc=now_utc)
+            self.alert_dispatcher.send_message(f'Entries resumed. override_utc={override_ts}')
+            self._emit_telegram_command_event('INFO', 'telegram_command_executed', 'Resume command executed.', values={'command': '/resume', 'override_utc': override_ts, 'update_id': update_id})
+            return 'accepted'
+        if command == '/close_symbol':
+            symbol = args.get('symbol', '')
+            pending = self._build_pending_confirmation(
+                chat_id=chat_id,
+                action='close_symbol',
+                args={'symbol': str(symbol)},
+                now_utc=now_utc,
+            )
+            self.alert_dispatcher.send_message(self._build_confirmation_prompt(pending))
+            self._emit_telegram_command_event('WARNING', 'telegram_command_confirmation_required', 'Close-symbol confirmation required.', values={'command': '/close SYMBOL', 'symbol': str(symbol), 'nonce': str(pending.get('nonce') or ''), 'update_id': update_id})
+            return 'accepted'
+        if command == '/close_all':
+            pending = self._build_pending_confirmation(
+                chat_id=chat_id,
+                action='close_all',
+                args={},
+                now_utc=now_utc,
+            )
+            self.alert_dispatcher.send_message(self._build_confirmation_prompt(pending))
+            self._emit_telegram_command_event('WARNING', 'telegram_command_confirmation_required', 'Close-all confirmation required.', values={'command': '/close all', 'nonce': str(pending.get('nonce') or ''), 'update_id': update_id})
+            return 'accepted'
+        if command == '/kill':
+            pending = self._build_pending_confirmation(
+                chat_id=chat_id,
+                action='kill',
+                args={},
+                now_utc=now_utc,
+            )
+            self.alert_dispatcher.send_message(self._build_confirmation_prompt(pending))
+            self._emit_telegram_command_event('CRITICAL', 'telegram_command_confirmation_required', 'Kill confirmation required.', values={'command': '/kill', 'nonce': str(pending.get('nonce') or ''), 'update_id': update_id})
+            return 'accepted'
+
+        self.alert_dispatcher.send_message(f'Command accepted: {command}')
+        return 'accepted'
+
+    def persist_telegram_update_offset(self, next_offset):
+        try:
+            normalized = max(0, int(next_offset))
+        except (TypeError, ValueError):
+            return
+        self.telegram_last_update_id = normalized
+        self.set_state_value('telegram_last_update_id', normalized)
+
+    def poll_telegram_commands_once(self, cycle_index):
+        if not self.alert_dispatcher.enabled:
+            return
+
+        try:
+            payload = self.alert_dispatcher.get_updates(
+                offset=self.telegram_last_update_id,
+                timeout_seconds=0,
+                limit=25,
+            )
+        except Exception as exc:
+            self.logger.warning('⚠️ Telegram command poll failed on cycle %s: %s', cycle_index, exc)
+            return
+
+        if not isinstance(payload, dict) or not payload.get('ok'):
+            self.logger.warning('⚠️ Telegram command poll warning on cycle %s: %s', cycle_index, payload)
+            return
+
+        updates = payload.get('updates')
+        if not isinstance(updates, list):
+            self.logger.warning('⚠️ Telegram command poll returned invalid updates payload on cycle %s', cycle_index)
+            return
+
+        sortable_updates = []
+        for raw_update in updates:
+            if not isinstance(raw_update, dict):
+                continue
+            try:
+                sortable_updates.append((int(raw_update.get('update_id')), raw_update))
+            except (TypeError, ValueError):
+                self.logger.warning('⚠️ Telegram update missing valid update_id: %s', raw_update)
+
+        sortable_updates.sort(key=lambda item: item[0])
+        for update_id, raw_update in sortable_updates:
+            try:
+                message = raw_update.get('message') or raw_update.get('edited_message')
+                if not isinstance(message, dict):
+                    continue
+
+                chat = message.get('chat')
+                text = message.get('text')
+                if not isinstance(chat, dict) or not isinstance(text, str):
+                    continue
+
+                chat_id = str(chat.get('id', '')).strip()
+                normalized_text = text.strip()
+                if normalized_text:
+                    self.route_telegram_command(
+                        chat_id=chat_id,
+                        text=normalized_text,
+                        update_id=update_id,
+                        now_utc=datetime.datetime.now(datetime.timezone.utc),
+                    )
+            except Exception as exc:
+                self.logger.warning('⚠️ Telegram update handling warning update_id=%s: %s', update_id, exc)
+            finally:
+                self.persist_telegram_update_offset(update_id + 1)
+
     def persist_runtime_state(self):
         self.set_state_value('current_balance', self.current_balance)
         self.set_state_value('total_pnl', self.total_pnl)
@@ -1041,6 +1676,10 @@ class Aribot:
         state_total_trades = self.get_state_int('total_trades')
         state_winning_trades = self.get_state_int('winning_trades')
         state_losing_trades = self.get_state_int('losing_trades')
+        state_telegram_last_update_id = self.get_state_int('telegram_last_update_id')
+        state_telegram_manual_pause_active = self.get_state_int('telegram_manual_pause_active')
+        state_telegram_manual_pause_updated_at = self.get_state_value('telegram_manual_pause_updated_at')
+        state_pending_confirmations_json = self.get_state_value('telegram_pending_confirmations_json')
         if state_balance is not None and state_total_pnl is not None:
             self.current_balance = state_balance
             self.total_pnl = state_total_pnl
@@ -1050,6 +1689,41 @@ class Aribot:
             self.winning_trades = state_winning_trades
         if state_losing_trades is not None:
             self.losing_trades = state_losing_trades
+        if state_telegram_last_update_id is not None:
+            self.telegram_last_update_id = max(0, state_telegram_last_update_id)
+        if state_telegram_manual_pause_active is not None:
+            self.manual_entry_paused = bool(state_telegram_manual_pause_active)
+        parsed_manual_override = self._safe_utc_from_iso(state_telegram_manual_pause_updated_at)
+        if parsed_manual_override is not None:
+            self.manual_override_timestamp_utc = parsed_manual_override
+
+        self.telegram_pending_confirmations = {}
+        if isinstance(state_pending_confirmations_json, str) and state_pending_confirmations_json.strip():
+            try:
+                decoded = json.loads(state_pending_confirmations_json)
+            except Exception:
+                decoded = {}
+
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            if isinstance(decoded, dict):
+                for chat_id, pending in decoded.items():
+                    if not isinstance(pending, dict):
+                        continue
+                    chat_key = str(chat_id or '').strip()
+                    action = str(pending.get('action') or '').strip()
+                    expires_at = self._safe_utc_from_iso(pending.get('expires_at_utc'))
+                    if not chat_key or not action or expires_at is None or now_utc >= expires_at:
+                        continue
+                    self.telegram_pending_confirmations[chat_key] = {
+                        'chat_id': chat_key,
+                        'action': action,
+                        'args': pending.get('args') if isinstance(pending.get('args'), dict) else {},
+                        'created_at_utc': str(pending.get('created_at_utc') or '').strip(),
+                        'expires_at_utc': expires_at.isoformat(),
+                        'nonce': str(pending.get('nonce') or uuid.uuid4().hex),
+                    }
+
+        self._persist_pending_confirmations()
 
     def reconcile_positions_on_startup(self):
         if not self.positions:
@@ -1686,7 +2360,9 @@ class Aribot:
                 break
 
             cycle += 1
+            self.loop_cycle_count = cycle
             self.logger.info(f"\n🔄 Cycle {cycle} @ {datetime.datetime.now()}")
+            self.poll_telegram_commands_once(cycle)
             self.sync_account_balance(force=False)
             self.reset_daily_session_if_needed()
             self.update_daily_drawdown_pause()
@@ -1700,18 +2376,21 @@ class Aribot:
                 else:
                     self.logger.info('🕓 4H close window active: evaluating new entry signals')
                 regime_signal = self.fetch_btc_regime_signal()
+                self.last_regime_signal = regime_signal or 'UNAVAILABLE'
                 if regime_signal is None:
                     self.logger.warning('⚠️ BTC regime unavailable; skipping new entries this window')
                 else:
                     self.logger.info(f'📈 BTC regime gate active: {regime_signal}-only entries')
                 for symbol in self.usdc_swaps:
-                    if self.daily_drawdown_paused:
+                    gate_reason = self.entry_gate_block_reason()
+                    if gate_reason == 'manual_pause':
+                        self.logger.info('⏸️ Manual pause active: skipping new entries')
+                        break
+                    if gate_reason == 'daily_drawdown_pause':
                         self.logger.info('🛑 Daily drawdown pause active: skipping new entries')
                         break
-                    if self.in_loss_cooldown():
-                        self.logger.info(
-                            f"⏸️ Loss cooldown active until {self.cooldown_until_utc.isoformat()}: skipping new entries"
-                        )
+                    if gate_reason == 'loss_cooldown':
+                        self.logger.info(f"⏸️ Loss cooldown active until {self.cooldown_until_utc.isoformat()}: skipping new entries")
                         break
                     if regime_signal is None:
                         break
