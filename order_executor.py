@@ -36,6 +36,7 @@ class OrderExecutor:
 
     NATIVE_STOP_LOSS_PCT = 0.025
     NATIVE_TAKE_PROFIT_PCT = 0.05
+    NATIVE_TP_PARTIAL_SIZE = 0.30
     NATIVE_TRAILING_CALLBACK = '0.015'
 
     IDEMPOTENCY_DDL = '''
@@ -186,6 +187,24 @@ class OrderExecutor:
                     idempotency_key=effective_key,
                 )
 
+            if order_reason == 'entry':
+                confirmed_fill = self._confirm_entry_fill(symbol, side, finalized)
+                if not confirmed_fill:
+                    message = (
+                        f"Entry order fill not confirmed from exchange for {symbol}; "
+                        f"order_id={order_id}. Position open skipped to avoid inaccurate SL/TP."
+                    )
+                    self._mark_intent_failed(effective_key, message)
+                    logger.error(message)
+                    return OrderResult(
+                        success=False,
+                        order_id=order_id,
+                        message=message,
+                        order_data=finalized,
+                        idempotency_key=effective_key,
+                    )
+                finalized.update(confirmed_fill)
+
             logger.info(f"Order executed: {order_id} status={terminal_status or 'unknown'}")
             self._mark_intent_success(effective_key, order_id, finalized)
             return OrderResult(
@@ -250,7 +269,13 @@ class OrderExecutor:
 
         logger.info(f'Leverage confirmed: {symbol} = {leverage}x')
 
-    def set_native_initial_protection(self, symbol: str, side: str, entry_price: float) -> Dict[str, Any]:
+    def set_native_initial_protection(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        quantity: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Set native fixed SL (MarkPrice) and final TP safety net for an open position."""
         normalized_side = str(side or '').strip().lower()
         try:
@@ -294,6 +319,7 @@ class OrderExecutor:
             'takeProfit': str(tp_price),
             'positionIdx': 0,
         }
+        tp_amount = self._resolve_partial_tp_amount(symbol, quantity)
 
         sl_result = self._set_trading_stop_safe(
             symbol,
@@ -306,6 +332,7 @@ class OrderExecutor:
             symbol,
             operation='set_initial_tp',
             payload=tp_payload,
+            amount=tp_amount,
             side=normalized_side,
             entry_price=entry,
         )
@@ -392,11 +419,76 @@ class OrderExecutor:
         side: str,
         entry_price: float,
         trailing_active: bool,
+        quantity: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Re-arm native protection for a live position during startup reconciliation."""
         if trailing_active:
             return self.set_native_trailing(symbol)
-        return self.set_native_initial_protection(symbol, side, entry_price)
+        return self.set_native_initial_protection(symbol, side, entry_price, quantity)
+
+    def _resolve_partial_tp_amount(self, symbol: str, quantity: Optional[float]) -> Optional[float]:
+        """Resolve a partial TP size from known quantity or live position contracts."""
+        base_qty = None
+        if quantity is not None:
+            try:
+                candidate = abs(float(quantity))
+                if candidate > 0:
+                    base_qty = candidate
+            except (TypeError, ValueError):
+                base_qty = None
+
+        if base_qty is None:
+            try:
+                position = self.exchange.fetch_position(symbol)
+                contracts = position.get('contracts') if isinstance(position, dict) else None
+                if contracts is not None:
+                    candidate = abs(float(contracts))
+                    if candidate > 0:
+                        base_qty = candidate
+            except Exception as exc:
+                logger.info('Could not resolve live position size for partial TP on %s: %s', symbol, str(exc))
+
+        if base_qty is None:
+            return None
+
+        partial_ratio = float(self.NATIVE_TP_PARTIAL_SIZE)
+        if partial_ratio <= 0:
+            return None
+        if partial_ratio > 1:
+            partial_ratio = 1.0
+
+        partial_qty = base_qty * partial_ratio
+        return partial_qty if partial_qty > 0 else None
+
+    def _build_ccxt_trading_stop_params(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Map internal payload fields to CCXT create_order trading-stop params."""
+        params: Dict[str, Any] = {
+            'tradingStopEndpoint': True,
+        }
+
+        if 'positionIdx' in payload and payload['positionIdx'] is not None:
+            params['positionIdx'] = int(payload['positionIdx'])
+
+        if 'slTriggerBy' in payload and payload['slTriggerBy'] is not None:
+            params['slTriggerBy'] = str(payload['slTriggerBy'])
+
+        if 'stopLoss' in payload:
+            value = payload['stopLoss']
+            if value is not None:
+                params['stopLossPrice'] = str(value)
+
+        if 'takeProfit' in payload:
+            value = payload['takeProfit']
+            if value is not None:
+                params['takeProfitPrice'] = str(value)
+
+        if 'trailingStop' in payload:
+            value = payload['trailingStop']
+            if value is not None:
+                params['trailingAmount'] = str(value)
+
+        return params
+
 
     def _set_trading_stop_safe(
         self,
@@ -404,18 +496,28 @@ class OrderExecutor:
         *,
         operation: str,
         payload: Dict[str, Any],
+        amount: Optional[float] = None,
         side: Optional[str] = None,
         entry_price: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Call exchange.set_trading_stop with warning-only failure semantics."""
+        """Set trading stops using CCXT unified create_order trading-stop endpoint only."""
         if self.dry_run:
             logger.info('DRY_RUN native stop %s for %s payload=%s', operation, symbol, payload)
             return {'ok': True, 'warnings': []}
 
-        warnings = []
         try:
-            self.exchange.set_trading_stop(symbol, params=payload)
-            return {'ok': True, 'warnings': warnings}
+            params = self._build_ccxt_trading_stop_params(payload)
+            order_amount = abs(float(amount)) if amount is not None else 0.0
+            self.exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side='buy',
+                amount=order_amount,
+                price=None,
+                params=params,
+            )
+            logger.info('Native stop set successfully via ccxt.create_order tradingStopEndpoint: %s operation=%s params=%s amount=%s', symbol, operation, params, order_amount)
+            return {'ok': True, 'warnings': []}
         except Exception as exc:
             error_type = type(exc).__name__
             warning_payload = {
@@ -426,16 +528,19 @@ class OrderExecutor:
                 'native_payload': payload,
                 'error_type': error_type,
                 'error': str(exc),
+                'ccxt_method': 'create_order',
             }
-            logger.warning('Native stop warning: %s', json.dumps(warning_payload, default=str))
-            warnings.append(
-                {
-                    'operation': operation,
-                    'error_type': error_type,
-                    'error': str(exc),
-                }
-            )
-            return {'ok': False, 'warnings': warnings}
+            logger.warning('Native stop warning (ccxt create_order failed): %s', json.dumps(warning_payload, default=str))
+            return {
+                'ok': False,
+                'warnings': [
+                    {
+                        'operation': operation,
+                        'error_type': error_type,
+                        'error': str(exc),
+                    }
+                ],
+            }
 
     def _ensure_idempotency_schema(self) -> None:
         cursor = self.idempotency_db.cursor()
@@ -608,3 +713,90 @@ class OrderExecutor:
             'fill_fee_cost': total_fee,
             'trade_count': len(order_trades),
         }
+
+    @staticmethod
+    def _extract_confirmed_fill(order_data: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        """Extract filled quantity and average fill price from exchange order payload."""
+        if not isinstance(order_data, dict):
+            return None
+
+        try:
+            filled = float(order_data.get('filled') or 0.0)
+        except (TypeError, ValueError):
+            filled = 0.0
+
+        avg_raw = order_data.get('avg_fill_price', order_data.get('average'))
+        try:
+            avg_fill_price = float(avg_raw or 0.0)
+        except (TypeError, ValueError):
+            avg_fill_price = 0.0
+
+        if filled > 0 and avg_fill_price > 0:
+            return {
+                'filled': filled,
+                'avg_fill_price': avg_fill_price,
+            }
+        return None
+
+    def _fetch_position_entry_snapshot(self, symbol: str, side: str) -> Optional[Dict[str, float]]:
+        """Fallback confirmation for entry fills via current exchange position snapshot."""
+        if not hasattr(self.exchange, 'fetch_position'):
+            return None
+
+        try:
+            position = self.exchange.fetch_position(symbol)
+        except Exception as exc:
+            logger.warning('fetch_position failed while confirming entry fill for %s: %s', symbol, exc)
+            return None
+
+        if not isinstance(position, dict):
+            return None
+
+        pos_side = str(position.get('side') or '').lower()
+        requested = str(side or '').lower()
+        if requested == 'buy' and pos_side not in {'long', 'buy'}:
+            return None
+        if requested == 'sell' and pos_side not in {'short', 'sell'}:
+            return None
+
+        try:
+            contracts = float(position.get('contracts') or 0.0)
+        except (TypeError, ValueError):
+            contracts = 0.0
+
+        entry_candidates = [position.get('entryPrice'), position.get('average'), position.get('avgPrice')]
+        entry_price = 0.0
+        for candidate in entry_candidates:
+            try:
+                entry_price = float(candidate or 0.0)
+            except (TypeError, ValueError):
+                entry_price = 0.0
+            if entry_price > 0:
+                break
+
+        if contracts > 0 and entry_price > 0:
+            return {
+                'filled': abs(contracts),
+                'avg_fill_price': entry_price,
+            }
+        return None
+
+    def _confirm_entry_fill(self, symbol: str, side: str, order_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Confirm entry fill from exchange data to avoid fallback-price SL/TP calculations."""
+        direct_fill = self._extract_confirmed_fill(order_data)
+        if direct_fill:
+            return {
+                'fill_confirmed': True,
+                'fill_source': 'order',
+                **direct_fill,
+            }
+
+        snapshot_fill = self._fetch_position_entry_snapshot(symbol, side)
+        if snapshot_fill:
+            return {
+                'fill_confirmed': True,
+                'fill_source': 'position_snapshot',
+                **snapshot_fill,
+            }
+
+        return None

@@ -1208,6 +1208,8 @@ class Aribot:
         gross_qty = gross_notional / price
         qty = net_notional / price
         side = 'long' if analysis['signal'] == 'BUY' else 'short'
+        exchange_entry_price = None
+        exchange_fill_source = None
 
         if self.live_execution_enabled:
             order_side = 'buy' if side == 'long' else 'sell'
@@ -1222,12 +1224,65 @@ class Aribot:
             )
             if not ok:
                 return False
-            price, qty = self.extract_order_fill(order_data, fallback_price=price, fallback_qty=qty)
+
+            if not isinstance(order_data, dict) or not bool(order_data.get('fill_confirmed', False)):
+                self.logger.error(
+                    f"❌ Entry fill not confirmed for {symbol}; refusing local position open to avoid incorrect SL/TP"
+                )
+                self.emit_structured_event(
+                    'CRITICAL',
+                    'entry_fill_not_confirmed',
+                    'execution',
+                    'Entry fill not confirmed from exchange; local open skipped.',
+                    symbol=symbol,
+                    values={
+                        'side': order_side,
+                        'requested_qty': qty,
+                        'order_data': order_data,
+                    },
+                )
+                return False
+
+            try:
+                confirmed_price = float(order_data.get('avg_fill_price'))
+                confirmed_qty = float(order_data.get('filled'))
+            except (TypeError, ValueError):
+                self.logger.error(
+                    f"❌ Invalid confirmed fill payload for {symbol}; order_data={order_data}"
+                )
+                return False
+
+            if confirmed_price <= 0 or confirmed_qty <= 0:
+                self.logger.error(
+                    f"❌ Non-positive confirmed fill for {symbol}; price={confirmed_price}, qty={confirmed_qty}"
+                )
+                return False
+
+            exchange_entry_price = confirmed_price
+            exchange_fill_source = str(order_data.get('fill_source') or 'unknown')
+            price, qty = confirmed_price, confirmed_qty
 
         pos = PaperPosition(symbol, side, price, qty, datetime.datetime.now())
         pos.round_trip_fee_rate = self.round_trip_fee_rate
         self.positions[symbol] = pos
         self.persist_position(pos)
+
+        stored_entry_price = float(pos.entry_price)
+        entry_diff_bps = None
+        if exchange_entry_price is not None and exchange_entry_price > 0:
+            entry_diff_bps = ((stored_entry_price - exchange_entry_price) / exchange_entry_price) * 10000.0
+
+        if entry_diff_bps is None:
+            self.logger.info(
+                f"📏 ENTRY CHECK {symbol}: exchange_entry=n/a, stored_entry={stored_entry_price:.8f}, "
+                f"diff_bps=n/a"
+            )
+        else:
+            self.logger.info(
+                f"📏 ENTRY CHECK {symbol}: exchange_entry={exchange_entry_price:.8f}, "
+                f"stored_entry={stored_entry_price:.8f}, diff_bps={entry_diff_bps:+.2f}, "
+                f"fill_source={exchange_fill_source}"
+            )
 
         # Copilot prompt: Keep native-stop failures non-blocking; only persist flags confirmed by exchange.
         self._apply_native_initial_protection(pos)
@@ -1295,6 +1350,7 @@ class Aribot:
             symbol=pos.symbol,
             side=pos.side,
             entry_price=pos.entry_price,
+            quantity=pos.quantity,
         )
         pos.native_sl_active = bool(result.get('native_sl_active', False))
         pos.native_tp_active = bool(result.get('native_tp_active', False))

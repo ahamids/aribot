@@ -1,370 +1,251 @@
-# Aribot
+﻿# Aribot
 
-Aribot is a Python trading bot project for Bybit perpetuals with three layers of functionality:
+Aribot runs from `usdt_paper_bot_v2.py` and trades Bybit perpetuals using a 4h strategy.
 
-1. A currently runnable paper-style strategy loop in [usdt_paper_bot_v2.py](usdt_paper_bot_v2.py)
-2. Live-trading safety scaffolding such as secrets validation, startup reconciliation, observability, deployment docs, and idempotent order submission helpers
-3. Validation and go-live documentation for promoting from testnet to mainnet
+This README is operator-focused and reflects implemented behavior in code.
 
-The default runnable path today is still the paper-style simulator. The repo also includes the infrastructure needed to harden a future live execution path.
+## Quickstart
 
-## Quick Start
+### 1) Install
+
+Requirements:
+
+1. Python 3.10+.
+2. `pip` (usually included with Python).
+3. Project dependencies: `ccxt`, `requests`, `python-dotenv`.
+
+Windows (PowerShell):
 
 ```powershell
+# Verify Python is installed. If this fails, install Python from python.org first.
+python --version
+
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install ccxt requests
-Copy-Item .env.example .env
-python usdt_paper_bot_v2.py
-```
-
-## Current State
-
-What is implemented now:
-
-1. Paper-style position simulation on Bybit market data
-2. SQLite persistence and restart recovery
-3. Risk controls including daily drawdown pause, cooldown, stop-loss checks, trailing stop, partial exits, and time exit
-4. Startup secret validation for authenticated modes
-5. Startup reconciliation gate for authenticated modes
-6. Structured logs, funding tracking, Telegram alert routing, and kill switch support
-7. Validation scripts and a go-live runbook
-
-Recently implemented for live readiness:
-
-1. Live execution engine wiring in the main strategy loop for `shadow` and `live` modes
-2. Terminal-state and partial-fill aware order handling in `order_executor.py`
-3. Startup Telegram end-to-end delivery verification path (bot auth + message probe)
-
-Remaining hardening work:
-
-1. Expanded exchange-side reconciliation for complex multi-order partial-close sequences
-2. Production runbook evidence capture for repeated mainnet dry-runs
-3. Additional alerting escalation channels beyond Telegram
-
-## Repository Layout
-
-Key files:
-
-1. [usdt_paper_bot_v2.py](usdt_paper_bot_v2.py): main runnable bot for USDT markets
-2. [usdc_paper_bot_v2.py](usdc_paper_bot_v2.py): older USDC variant
-3. [secret_loader.py](secret_loader.py): environment and Bybit permission validation
-4. [startup_reconciler.py](startup_reconciler.py): authenticated startup reconciliation gate
-5. [observability.py](observability.py): structured events, kill switch monitor, funding tracker
-6. [order_executor.py](order_executor.py): order helper with idempotency ledger
-7. [verify_bot_v2.py](verify_bot_v2.py): deterministic verification harness
-8. [test_live_bot.py](test_live_bot.py): validation suite for safety and operational checks
-9. [.env.example](.env.example): sample runtime configuration
-10. [docs/go_live_runbook.md](docs/go_live_runbook.md): staged promotion process
-11. [docs/deployment_checklist.md](docs/deployment_checklist.md): deployment steps
-
-## Requirements
-
-1. Python 3.11+ recommended
-2. `ccxt`
-3. `requests`
-
-Install dependencies:
-
-```bash
-pip install ccxt requests
-```
-
-## Getting Started
-
-### 1. Clone and open the repo
-
-```bash
-git clone <your-repo-url>
-cd aribot
-```
-
-### 2. Create and activate a virtual environment
-
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### 3. Install dependencies
-
-```bash
-pip install ccxt requests
-```
-
-### 4. Create your env file
-
-Copy [.env.example](.env.example) to `.env` and update the values.
-
-Windows PowerShell:
-
-```powershell
+python -m pip install --upgrade pip
+python -m pip install ccxt requests python-dotenv
 Copy-Item .env.example .env
 ```
 
-Important:
+Linux server (Ubuntu/Debian):
 
-1. `.env` is ignored by git
-2. `.env.example` should stay as placeholders only
-3. For `paper` mode, placeholder API keys can remain unused
-4. For `shadow` and `live`, valid Bybit keypairs are required
+```bash
+# Install Python and venv tooling if missing
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip
 
-### 5. Choose a mode
+python3 --version
 
-Mode behavior is currently:
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install ccxt requests python-dotenv
+cp .env.example .env
+```
 
-1. `paper`
-   Uses market data and local simulation only
-   No authenticated startup reconciliation
-   No Bybit credentials required to start
-2. `shadow`
-   Requires validated Bybit keypairs
-   Runs startup permission checks and startup reconciliation
-   Uses live execution path in exchange `DRY_RUN` mode (no real order submission)
-3. `live`
-   Uses live execution path with trade key order submission enabled
-   Uses exchange USDT balance for position sizing
-   Enforces startup Telegram verification when `TELEGRAM_VERIFY_ON_START=true`
+### 2) Choose mode
 
-## Environment Setup
+`BOT_MODE` supports:
 
-The sample env file is documented in [.env.example](.env.example).
+1. `paper`: local simulation from market data.
+2. `shadow`: authenticated startup + reconciliation enabled, executor forced to dry-run behavior.
+3. `live`: authenticated startup + reconciliation + exchange order submission enabled.
 
-Important variables:
-
-1. `BOT_MODE`
-   One of `paper`, `shadow`, or `live`
-2. `BYBIT_TESTNET`
-   `true` for testnet, `false` for mainnet
-3. `KILL_SWITCH_FILE`
-   File path watched by the kill switch monitor
-4. `BYBIT_READ_API_KEY` and `BYBIT_READ_API_SECRET`
-   Required for `shadow` and `live`
-5. `BYBIT_TRADE_API_KEY` and `BYBIT_TRADE_API_SECRET`
-   Required for `shadow` and `live`
-   Withdrawal permission must be disabled
-6. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
-   Optional, only needed if you want Telegram alert delivery
-7. `TELEGRAM_VERIFY_ON_START`
-   Defaults to `true`
-   In `live`, startup fails if end-to-end Telegram verification fails
-8. `ORDER_STATUS_TIMEOUT_SECONDS` and `ORDER_STATUS_POLL_INTERVAL_SECONDS`
-   Optional tuning for order terminal-state polling in the executor
-
-## Running the Bot
-
-Default run command:
+### 3) Run
 
 ```bash
 python usdt_paper_bot_v2.py
 ```
 
-The bot will:
+## Required Environment
 
-1. Validate startup secrets
-2. Load markets and leverage config
-3. In `shadow` or `live`, run authenticated startup reconciliation
-4. Verify Telegram delivery readiness (if enabled)
-5. Start the main loop
+Minimum practical env (edit `.env`):
 
-Stop with `Ctrl+C`.
+```dotenv
+BOT_MODE=paper
+BYBIT_TESTNET=true
+KILL_SWITCH_FILE=kill_switch.flag
 
-Runtime artifacts:
+BYBIT_READ_API_KEY=
+BYBIT_READ_API_SECRET=
+BYBIT_TRADE_API_KEY=
+BYBIT_TRADE_API_SECRET=
 
-1. SQLite database: `usdt_paper_bot_v2.db`
-2. Runtime log: `usdt_paper_trading_log.txt`
-3. Structured events: `observability.jsonl`
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_VERIFY_ON_START=true
 
-## Strategy Summary
+DRY_RUN=false
+ORDER_STATUS_TIMEOUT_SECONDS=30
+ORDER_STATUS_POLL_INTERVAL_SECONDS=1.5
+ORDER_EXECUTOR_DB=usdt_paper_bot_v2.db
+```
 
-The active strategy loop currently:
+Mode semantics:
 
-1. Uses 4-hour candles and OHLC4 price source
-2. Computes `WMA(45)` with offset `2`
-3. Applies BTC regime gating
-4. Evaluates new entries near 4-hour UTC boundaries
-5. Simulates position sizing using leverage buckets from [leverage_buckets.json](leverage_buckets.json)
-   In `shadow`/`live`, sizing is based on synced exchange USDT balance
-6. Manages open positions with:
-   - stop-loss checks
-   - trailing stop logic
-   - partial profit taking
-   - time exit
-   - daily drawdown pause
-   - consecutive-loss cooldown
+1. In `shadow` and `live`, both keypairs are required and validated.
+2. `secret_loader.py` checks Bybit key metadata via signed `GET /v5/user/query-api` calls.
+3. Startup rejects keys that appear to have withdraw permission.
+4. In `live`, if `TELEGRAM_VERIFY_ON_START=true`, Telegram startup verification failure aborts startup.
 
-## Validation and Verification
+## What Runs at Startup
 
-### Verify core logic
+1. Parse env and mode.
+2. Validate secrets and kill switch file.
+3. Build bot components (exchange client, DB, observability, reconciler).
+4. In `shadow`/`live`, run startup reconciliation gate before entering loop.
+5. Optionally run Telegram delivery readiness check.
+6. Enter main loop (`60` second cadence).
+
+## Strategy (Implemented)
+
+### Signal model
+
+1. Candle timeframe: `4h`.
+2. Price source: `OHLC4 = (O + H + L + C) / 4`.
+3. Entry line: `WMA(45)` with offset `2`.
+4. Regime filter: BTC OHLC4 vs BTC `WMA(200)`.
+   - Above -> only `BUY` candidates.
+   - Below -> only `SELL` candidates.
+5. Confirmation rule (`confirm_signal`) requires consecutive directional context and breakout/breakdown close logic.
+
+### Entry window and filters
+
+1. Cycle `1` does a bootstrap entry scan.
+2. Normal entry scans occur on 4h boundary windows.
+3. Stale ticker filter: age must be `<= 600` seconds.
+4. Frozen ticker filter: rejects repeated unchanged tick signatures after `2` cycles.
+5. Entry volume filter: 24h quote volume must be `> 5_000_000`.
+
+### Entry sizing
+
+1. Base risk fraction: `0.11` of current balance.
+2. ATR scalar rule: if `atr_ratio > 0.05`, risk is multiplied by `0.5`.
+3. Leverage tiers (from bucket mapping):
+   - major `5x`, large_alt `3x`, mid_cap `2x`, default `1x`.
+4. Quantity is fee-adjusted with `round_trip_fee_rate = 0.0011`.
+
+## Position Management
+
+Per open position, each loop:
+
+1. Reprice and recompute PnL.
+2. Hard stop: close if pnl% `<= -2.5`.
+3. Partial profits: levels `2%`, `3%`, `5%` with sizes `30%`, `30%`, `40%`.
+4. Trailing stop activation: at `+2%` pnl.
+5. Trailing callback buffer: `1.5%` from peak.
+6. Close on trailing breach.
+7. Time exit at `40` hours.
+
+## SL/TP/Trailing on Exchange
+
+`order_executor.py` uses CCXT-only trading-stop flow:
+
+1. Native initial SL: `2.5%` from entry, MarkPrice trigger.
+2. Native initial TP: `5%` from entry.
+3. Native TP partial amount ratio default: `0.30`.
+4. On trailing activation, bot requests native trailing callback `0.015` and clears fixed SL/TP.
+5. Native protection failures are warning-only (non-blocking).
+
+## Fill and PnL Handling
+
+### Entry fill policy
+
+In live execution, entry open requires confirmed exchange fill data:
+
+1. Confirm from order/trade aggregation first.
+2. Fallback confirmation from `fetch_position` snapshot.
+3. If not confirmed, local position open is skipped to avoid incorrect SL/TP.
+
+### Internal PnL formulas
+
+1. Price-only pnl%:
+   - long: `((current - entry) / entry) * 100`
+   - short: `((entry - current) / entry) * 100`
+2. Monetary PnL:
+   - gross from price delta * quantity
+   - fee cost = average notional * `0.0011`
+   - net pnl = gross - fee cost
+
+## Risk Controls
+
+1. Daily drawdown breaker: pause entries when drawdown from session baseline is `<= -5%`.
+2. Consecutive-loss cooldown: after `3` losses, pause entries for `2` candles (`8` hours).
+3. Position cap: maximum `10` concurrent opens.
+4. Kill switch:
+   - startup refuses if `KILL_SWITCH_FILE` exists,
+   - runtime triggers emergency close flow,
+   - intentional shutdown code is `42`.
+
+## Bybit Call Surface
+
+### Read-side calls
+
+1. `load_markets`
+2. `fetch_ticker`
+3. `fetch_ohlcv`
+4. `fetch_balance` (live execution enabled)
+5. `fetch_funding_rate`
+6. `fetch_positions`, `fetch_my_trades` (reconciliation/fill paths)
+
+### Order-side calls
+
+1. `create_order` for entries/exits/partials.
+2. `set_leverage` before entry orders.
+3. `fetch_order` polling and `fetch_my_trades` fill summary.
+4. Trading-stop via CCXT `create_order(..., params={'tradingStopEndpoint': True, ...})`.
+
+## Persistence and Recovery
+
+Main runtime DB: `usdt_bot_v2.db`.
+
+Runtime tables:
+
+1. `positions`
+2. `closed_trades`
+3. `partial_realizations`
+4. `bot_state`
+5. `funding_payments`
+6. `reconciliation_reports`
+7. `reconciliation_items`
+
+Executor idempotency DB path comes from `ORDER_EXECUTOR_DB` (default `usdt_paper_bot_v2.db`) and stores `order_idempotency`.
+
+Recovery behavior:
+
+1. Persisted positions are restored and repriced at startup.
+2. Stop/exit conditions can trigger immediate close after restore.
+3. In authenticated modes, startup reconciliation can block loop start when manual review is required.
+
+## Verification
+
+### Deterministic harness
 
 ```bash
 python verify_bot_v2.py --market usdt
-```
-
-Strict mode:
-
-```bash
 python verify_bot_v2.py --market usdt --strict
 ```
 
-This checks:
-
-1. Signal-window behavior
-2. ATR calculation
-3. Fee-adjusted PnL logic
-4. Time exit logic
-5. Daily drawdown breaker logic
-6. Cooldown logic
-7. Expected log markers
-
-### Run the live validation suite
+### Live/test harness
 
 ```bash
 python test_live_bot.py
 ```
 
-This currently validates:
+## Deployment (systemd)
 
-1. Startup ghost-position blocking behavior
-2. Kill switch shutdown path
-3. Funding PnL deduction path
-4. `DRY_RUN` protection
-5. Idempotency duplicate suppression
-6. Stop-loss checks per update cycle
-7. Telegram alert routing logic
+Service file: `deploy/aribot.service`.
 
-The real Bybit order-placement test is skipped unless valid testnet credentials are present in the environment.
-
-## Deployment and Go-Live Docs
-
-Deployment and promotion references:
-
-1. [docs/deployment_checklist.md](docs/deployment_checklist.md)
-2. [docs/go_live_runbook.md](docs/go_live_runbook.md)
-3. [docs/branching_strategy.md](docs/branching_strategy.md)
-
-## Notes and Caveats
-
-1. The strategy now contains a dual-path runtime: paper simulation and live execution wiring.
-2. `shadow` uses exchange-dry-run execution; `live` submits market orders via the executor.
-3. If you run in `paper`, authenticated startup reconciliation is intentionally skipped.
-4. If you run in `shadow` or `live`, valid Bybit credentials must be configured or startup will fail.
-
-## Troubleshooting
-
-### Missing credentials
-
-Symptom:
-
-```text
-Startup validation failed: Missing required environment variables: ...
+```bash
+sudo cp deploy/aribot.service /etc/systemd/system/aribot.service
+sudo systemctl daemon-reload
+sudo systemctl enable aribot
+sudo systemctl restart aribot
+sudo systemctl status aribot
 ```
 
-Cause:
+## Runtime Artifacts
 
-1. `BOT_MODE` is `shadow` or `live`
-2. One or more required Bybit env vars are empty
-
-Fix:
-
-1. Open `.env`
-2. Set all required values:
-   - `BYBIT_READ_API_KEY`
-   - `BYBIT_READ_API_SECRET`
-   - `BYBIT_TRADE_API_KEY`
-   - `BYBIT_TRADE_API_SECRET`
-3. If you only want local simulation, set `BOT_MODE=paper`
-
-### Kill switch present at startup
-
-Symptom:
-
-```text
-Startup validation failed: Kill switch file detected at startup: ...
-```
-
-Cause:
-
-1. The file referenced by `KILL_SWITCH_FILE` exists
-
-Fix:
-
-1. Remove the kill switch file
-2. Confirm `.env` points to the expected path
-3. Restart the bot
-
-### Startup reconciliation block
-
-Symptom:
-
-```text
-Startup reconciliation failed: Startup reconciliation failed. Manual review required before main loop can start.
-```
-
-Cause:
-
-1. You are running in `shadow` or `live`
-2. The reconciler detected a ghost position or another startup mismatch requiring manual review
-
-Fix:
-
-1. Review the latest reconciliation entries in the SQLite database
-2. Inspect `observability.jsonl` and `usdt_paper_trading_log.txt`
-3. Resolve the exchange-vs-local mismatch before restarting
-4. Do not bypass this in `shadow` or `live`
-
-### Bybit authentication error in paper mode
-
-Symptom:
-
-```text
-ccxt.base.errors.AuthenticationError: bybit requires "apiKey" credential
-```
-
-Cause:
-
-1. This should not happen in current `paper` mode startup
-2. It usually means you are not actually running with `BOT_MODE=paper`, or a different authenticated path was introduced
-
-Fix:
-
-1. Confirm `.env` has `BOT_MODE=paper`
-2. Re-run with the current code from this repo
-3. If it still happens, inspect recent changes around startup reconciliation and exchange initialization
-
-### Telegram alerts not sending
-
-Symptom:
-
-1. Bot runs normally
-2. No Telegram alerts arrive
-
-Cause:
-
-1. `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is missing or invalid
-2. Network access to Telegram failed
-
-Fix:
-
-1. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`
-2. Restart the bot
-3. Trigger a known alert path such as `position_opened` or kill switch detection
-
-### Test suite skips real exchange order test
-
-Symptom:
-
-```text
-[1] Order placement on Bybit testnet: SKIP
-```
-
-Cause:
-
-1. Testnet trading credentials are not set in the environment
-
-Fix:
-
-1. Set `BYBIT_TRADE_API_KEY` and `BYBIT_TRADE_API_SECRET`
-2. Also set `TESTNET_SYMBOL` and `TESTNET_ORDER_QTY` before running `python test_live_bot.py`
+1. Text log: `usdt_trading_log.txt`
+2. Structured events: `observability.jsonl`
+3. Runtime DB: `usdt_bot_v2.db`
