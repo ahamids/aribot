@@ -84,11 +84,13 @@ class StartupReconciler:
         db: sqlite3.Connection,
         logger: logging.Logger,
         alert_dispatcher: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
+        native_stop_executor: Optional[Any] = None,
     ) -> None:
         self.exchange = exchange
         self.db = db
         self.logger = logger
         self.alert_dispatcher = alert_dispatcher
+        self.native_stop_executor = native_stop_executor
 
     def ensure_schema(self) -> None:
         cursor = self.db.cursor()
@@ -213,6 +215,61 @@ class StartupReconciler:
                     )
                 )
 
+        if self.native_stop_executor is not None:
+            # Copilot prompt: Re-arm branch-B native protection only when local flags show nothing active; warnings must not block startup.
+            refreshed_local_positions = self.load_local_open_positions()
+            for symbol in overlap_symbols:
+                local_pos = refreshed_local_positions.get(symbol)
+                if not local_pos:
+                    continue
+
+                native_sl_active = bool(local_pos.get('native_sl_active'))
+                native_tp_active = bool(local_pos.get('native_tp_active'))
+                native_trail_active = bool(local_pos.get('native_trail_active'))
+                if native_sl_active or native_tp_active or native_trail_active:
+                    continue
+
+                trailing_active = bool(local_pos.get('trailing_stop_active'))
+                result = self.native_stop_executor.ensure_native_protection_for_position(
+                    symbol=symbol,
+                    side=local_pos['side'],
+                    entry_price=local_pos['entry_price'],
+                    trailing_active=trailing_active,
+                )
+                if result.get('ok', False):
+                    self.update_local_native_flags(
+                        symbol=symbol,
+                        native_sl_active=result.get('native_sl_active', False),
+                        native_tp_active=result.get('native_tp_active', False),
+                        native_trail_active=result.get('native_trail_active', False),
+                        native_sl_price=result.get('native_sl_price'),
+                    )
+                    items.append(
+                        ReconciliationItem(
+                            symbol=symbol,
+                            severity='INFO',
+                            category='native_protection_rearmed',
+                            message='Missing native protection re-armed during startup reconciliation.',
+                            details={
+                                'trailing_active': trailing_active,
+                                'result': result,
+                            },
+                        )
+                    )
+                else:
+                    items.append(
+                        ReconciliationItem(
+                            symbol=symbol,
+                            severity='WARNING',
+                            category='native_protection_rearm_failed',
+                            message='Failed to re-arm missing native protection during startup reconciliation.',
+                            details={
+                                'trailing_active': trailing_active,
+                                'result': result,
+                            },
+                        )
+                    )
+
         finished_at = datetime.datetime.now(datetime.timezone.utc)
         warning_count = sum(1 for item in items if item.severity == 'WARNING')
         critical_count = sum(1 for item in items if item.severity == 'CRITICAL')
@@ -268,8 +325,21 @@ class StartupReconciler:
 
     def load_local_open_positions(self) -> Dict[str, Dict[str, Any]]:
         cursor = self.db.cursor()
+        table_info_rows = cursor.execute("PRAGMA table_info(positions)").fetchall()
+        existing_columns = {row[1] for row in table_info_rows}
+
+        trailing_expr = 'trailing_stop_active' if 'trailing_stop_active' in existing_columns else '0 AS trailing_stop_active'
+        native_sl_expr = 'native_sl_active' if 'native_sl_active' in existing_columns else '0 AS native_sl_active'
+        native_tp_expr = 'native_tp_active' if 'native_tp_active' in existing_columns else '0 AS native_tp_active'
+        native_trail_expr = 'native_trail_active' if 'native_trail_active' in existing_columns else '0 AS native_trail_active'
+        native_sl_price_expr = 'native_sl_price' if 'native_sl_price' in existing_columns else 'NULL AS native_sl_price'
+
         rows = cursor.execute(
-            "SELECT symbol, side, entry_price, quantity, timestamp FROM positions"
+            (
+                'SELECT symbol, side, entry_price, quantity, timestamp, '
+                f'{trailing_expr}, {native_sl_expr}, {native_tp_expr}, {native_trail_expr}, {native_sl_price_expr} '
+                'FROM positions'
+            )
         ).fetchall()
 
         result: Dict[str, Dict[str, Any]] = {}
@@ -280,6 +350,11 @@ class StartupReconciler:
                 'entry_price': float(row['entry_price']),
                 'quantity': float(row['quantity']),
                 'timestamp': row['timestamp'],
+                'trailing_stop_active': int(row['trailing_stop_active'] or 0),
+                'native_sl_active': int(row['native_sl_active'] or 0),
+                'native_tp_active': int(row['native_tp_active'] or 0),
+                'native_trail_active': int(row['native_trail_active'] or 0),
+                'native_sl_price': row['native_sl_price'],
             }
 
         return result
@@ -351,7 +426,10 @@ class StartupReconciler:
                 pnl = (close_price - entry_price) * qty
             else:
                 pnl = (entry_price - close_price) * qty
-            pnl_pct = (pnl / (entry_price * qty)) * 100.0
+            # Keep archived percentage aligned with runtime stop logic: derive only from prices.
+            from usdt_paper_bot_v2 import derive_pnl_pct
+
+            pnl_pct = derive_pnl_pct(entry_price, close_price, side)
 
         cursor.execute(
             '''
@@ -375,6 +453,35 @@ class StartupReconciler:
         )
 
         cursor.execute('DELETE FROM positions WHERE symbol = ?', (symbol,))
+        self.db.commit()
+
+    def update_local_native_flags(
+        self,
+        symbol: str,
+        *,
+        native_sl_active: bool,
+        native_tp_active: bool,
+        native_trail_active: bool,
+        native_sl_price: Optional[float],
+    ) -> None:
+        cursor = self.db.cursor()
+        cursor.execute(
+            '''
+            UPDATE positions
+            SET native_sl_active = ?,
+                native_tp_active = ?,
+                native_trail_active = ?,
+                native_sl_price = ?
+            WHERE symbol = ?
+            ''',
+            (
+                1 if native_sl_active else 0,
+                1 if native_tp_active else 0,
+                1 if native_trail_active else 0,
+                native_sl_price,
+                symbol,
+            ),
+        )
         self.db.commit()
 
     def upsert_local_position_from_exchange(
@@ -404,6 +511,7 @@ class StartupReconciler:
                 entry_price,
                 qty,
                 ts,
+                # Startup upsert stores a neutral cached pct; live refresh derives true pct from market price.
                 entry_price,
             ),
         )

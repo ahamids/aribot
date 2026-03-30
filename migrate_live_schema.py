@@ -12,6 +12,10 @@ POSITIONS_ADDITIONAL_COLUMNS = {
     "exchange_order_id": "TEXT",
     "avg_fill_price": "REAL",
     "slippage_bps": "REAL",
+    "native_sl_active": "INTEGER DEFAULT 0",
+    "native_tp_active": "INTEGER DEFAULT 0",
+    "native_trail_active": "INTEGER DEFAULT 0",
+    "native_sl_price": "REAL",
 }
 
 

@@ -27,8 +27,16 @@ class OrderResult:
     idempotency_key: Optional[str] = None
 
 
+class LeverageSetError(Exception):
+    """Raised when leverage cannot be set before an entry order."""
+
+
 class OrderExecutor:
     """Executes orders on Bybit exchange using CCXT."""
+
+    NATIVE_STOP_LOSS_PCT = 0.025
+    NATIVE_TAKE_PROFIT_PCT = 0.05
+    NATIVE_TRAILING_CALLBACK = '0.015'
 
     IDEMPOTENCY_DDL = '''
     CREATE TABLE IF NOT EXISTS order_idempotency (
@@ -77,6 +85,9 @@ class OrderExecutor:
         amount: float,
         price: Optional[float] = None,
         idempotency_key: Optional[str] = None,
+        *,
+        order_reason: str = 'unspecified',
+        leverage: Optional[float] = None,
     ) -> OrderResult:
         """
         Execute an order on Bybit.
@@ -144,6 +155,12 @@ class OrderExecutor:
                     idempotency_key=effective_key,
                 )
 
+            # Branch C: leverage must be confirmed before entry order placement.
+            if order_reason == 'entry':
+                if leverage is None:
+                    raise LeverageSetError(f'Entry order missing leverage for {symbol}')
+                self._ensure_leverage(symbol, leverage)
+
             order = self.exchange.create_order(
                 symbol=symbol,
                 type=order_type,
@@ -179,6 +196,9 @@ class OrderExecutor:
                 idempotency_key=effective_key,
             )
 
+        except LeverageSetError as e:
+            self._mark_intent_failed(effective_key, str(e))
+            return OrderResult(success=False, order_id=None, message=str(e), idempotency_key=effective_key)
         except ccxt.ExchangeError as e:
             logger.error(f"Exchange error: {str(e)}")
             self._mark_intent_failed(effective_key, str(e))
@@ -187,6 +207,235 @@ class OrderExecutor:
             logger.error(f"Unexpected error: {str(e)}")
             self._mark_intent_failed(effective_key, str(e))
             return OrderResult(success=False, order_id=None, message=str(e), idempotency_key=effective_key)
+
+    def _ensure_leverage(self, symbol: str, leverage: float) -> None:
+        """Set and confirm leverage before submitting an entry order."""
+        try:
+            leverage_value = float(leverage)
+        except (TypeError, ValueError) as exc:
+            raise LeverageSetError(f'Leverage setup failed for {symbol} at {leverage}x: invalid leverage') from exc
+
+        if leverage_value <= 0:
+            raise LeverageSetError(f'Leverage setup failed for {symbol} at {leverage}x: leverage must be > 0')
+
+        if leverage_value.is_integer():
+            leverage_value = int(leverage_value)
+
+        try:
+            self.exchange.set_leverage(
+                leverage_value,
+                symbol,
+                params={
+                    'buyLeverage': leverage_value,
+                    'sellLeverage': leverage_value,
+                },
+            )
+        except Exception as exc:
+            # Some Bybit account modes reject explicit buy/sell leverage params.
+            try:
+                self.exchange.set_leverage(leverage_value, symbol)
+                logger.info('Leverage confirmed via fallback call: %s = %sx', symbol, leverage)
+                return
+            except Exception as fallback_exc:
+                fallback_text = str(fallback_exc).lower()
+                if '110043' in fallback_text or 'leverage not modified' in fallback_text:
+                    logger.info('Leverage already set (idempotent): %s = %sx', symbol, leverage)
+                    return
+                message = (
+                    f'Leverage setup failed for {symbol} at {leverage}x: '
+                    f'primary_error={exc}; fallback_error={fallback_exc}'
+                )
+                logger.error(message)
+                raise LeverageSetError(message) from fallback_exc
+
+        logger.info(f'Leverage confirmed: {symbol} = {leverage}x')
+
+    def set_native_initial_protection(self, symbol: str, side: str, entry_price: float) -> Dict[str, Any]:
+        """Set native fixed SL (MarkPrice) and final TP safety net for an open position."""
+        normalized_side = str(side or '').strip().lower()
+        try:
+            entry = float(entry_price)
+        except (TypeError, ValueError):
+            return {
+                'ok': False,
+                'operation': 'set_initial',
+                'error_type': 'invalid_entry_price',
+                'error': f'Invalid entry_price={entry_price}',
+                'warnings': [],
+                'native_sl_active': False,
+                'native_tp_active': False,
+                'native_trail_active': False,
+                'native_sl_price': None,
+            }
+
+        if entry <= 0:
+            return {
+                'ok': False,
+                'operation': 'set_initial',
+                'error_type': 'invalid_entry_price',
+                'error': f'entry_price must be > 0, got {entry}',
+                'warnings': [],
+                'native_sl_active': False,
+                'native_tp_active': False,
+                'native_trail_active': False,
+                'native_sl_price': None,
+            }
+
+        is_long = normalized_side in {'long', 'buy'}
+        sl_price = entry * (1.0 - self.NATIVE_STOP_LOSS_PCT) if is_long else entry * (1.0 + self.NATIVE_STOP_LOSS_PCT)
+        tp_price = entry * (1.0 + self.NATIVE_TAKE_PROFIT_PCT) if is_long else entry * (1.0 - self.NATIVE_TAKE_PROFIT_PCT)
+
+        sl_payload = {
+            'stopLoss': str(sl_price),
+            'slTriggerBy': 'MarkPrice',
+            'positionIdx': 0,
+        }
+        tp_payload = {
+            'takeProfit': str(tp_price),
+            'positionIdx': 0,
+        }
+
+        sl_result = self._set_trading_stop_safe(
+            symbol,
+            operation='set_initial_sl',
+            payload=sl_payload,
+            side=normalized_side,
+            entry_price=entry,
+        )
+        tp_result = self._set_trading_stop_safe(
+            symbol,
+            operation='set_initial_tp',
+            payload=tp_payload,
+            side=normalized_side,
+            entry_price=entry,
+        )
+
+        warnings = sl_result['warnings'] + tp_result['warnings']
+        return {
+            'ok': bool(sl_result['ok'] and tp_result['ok']),
+            'operation': 'set_initial',
+            'warnings': warnings,
+            'native_sl_active': bool(sl_result['ok']),
+            'native_tp_active': bool(tp_result['ok']),
+            'native_trail_active': False,
+            'native_sl_price': sl_price if sl_result['ok'] else None,
+        }
+
+    def set_native_trailing(self, symbol: str) -> Dict[str, Any]:
+        """Activate native trailing callback and clear fixed SL/TP protection."""
+        trail_payload = {
+            'trailingStop': self.NATIVE_TRAILING_CALLBACK,
+            'positionIdx': 0,
+        }
+        clear_fixed_payload = {
+            'stopLoss': '0',
+            'takeProfit': '0',
+            'positionIdx': 0,
+        }
+
+        trail_result = self._set_trading_stop_safe(
+            symbol,
+            operation='set_trailing',
+            payload=trail_payload,
+        )
+        clear_result = self._set_trading_stop_safe(
+            symbol,
+            operation='clear_fixed_for_trailing',
+            payload=clear_fixed_payload,
+        )
+
+        warnings = trail_result['warnings'] + clear_result['warnings']
+        return {
+            'ok': bool(trail_result['ok'] and clear_result['ok']),
+            'operation': 'set_trailing',
+            'warnings': warnings,
+            'native_sl_active': False,
+            'native_tp_active': False,
+            'native_trail_active': bool(trail_result['ok']),
+            'native_sl_price': None,
+        }
+
+    def clear_native_protection(self, symbol: str) -> Dict[str, Any]:
+        """Clear all native stop settings; never raises on failure."""
+        zero_payload = {
+            'stopLoss': '0',
+            'takeProfit': '0',
+            'trailingStop': '0',
+            'positionIdx': 0,
+        }
+        none_payload = {
+            'stopLoss': None,
+            'takeProfit': None,
+            'trailingStop': None,
+            'positionIdx': 0,
+        }
+
+        primary = self._set_trading_stop_safe(symbol, operation='clear_all', payload=zero_payload)
+        fallback = {'ok': False, 'warnings': []}
+        if not primary['ok']:
+            fallback = self._set_trading_stop_safe(symbol, operation='clear_all_fallback_none', payload=none_payload)
+
+        warnings = primary['warnings'] + fallback['warnings']
+        return {
+            'ok': bool(primary['ok'] or fallback['ok']),
+            'operation': 'clear_all',
+            'warnings': warnings,
+            'native_sl_active': False,
+            'native_tp_active': False,
+            'native_trail_active': False,
+            'native_sl_price': None,
+        }
+
+    def ensure_native_protection_for_position(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        trailing_active: bool,
+    ) -> Dict[str, Any]:
+        """Re-arm native protection for a live position during startup reconciliation."""
+        if trailing_active:
+            return self.set_native_trailing(symbol)
+        return self.set_native_initial_protection(symbol, side, entry_price)
+
+    def _set_trading_stop_safe(
+        self,
+        symbol: str,
+        *,
+        operation: str,
+        payload: Dict[str, Any],
+        side: Optional[str] = None,
+        entry_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Call exchange.set_trading_stop with warning-only failure semantics."""
+        if self.dry_run:
+            logger.info('DRY_RUN native stop %s for %s payload=%s', operation, symbol, payload)
+            return {'ok': True, 'warnings': []}
+
+        warnings = []
+        try:
+            self.exchange.set_trading_stop(symbol, params=payload)
+            return {'ok': True, 'warnings': warnings}
+        except Exception as exc:
+            error_type = type(exc).__name__
+            warning_payload = {
+                'symbol': symbol,
+                'operation': operation,
+                'position_side': side,
+                'entry_price': entry_price,
+                'native_payload': payload,
+                'error_type': error_type,
+                'error': str(exc),
+            }
+            logger.warning('Native stop warning: %s', json.dumps(warning_payload, default=str))
+            warnings.append(
+                {
+                    'operation': operation,
+                    'error_type': error_type,
+                    'error': str(exc),
+                }
+            )
+            return {'ok': False, 'warnings': warnings}
 
     def _ensure_idempotency_schema(self) -> None:
         cursor = self.idempotency_db.cursor()

@@ -24,6 +24,26 @@ from order_executor import OrderExecutor
 from secret_loader import SecretLoader, SecretValidationError
 from startup_reconciler import StartupReconciler
 
+
+def derive_pnl_pct(entry_price, current_price, side):
+    """Return strategy-facing, price-only PnL percent independent of leverage."""
+    try:
+        ep = float(entry_price)
+        cp = float(current_price)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if ep <= 0.0:
+        return 0.0
+
+    normalized_side = str(side or '').strip().lower()
+    if normalized_side in {'long', 'buy'}:
+        return ((cp - ep) / ep) * 100.0
+    if normalized_side in {'short', 'sell'}:
+        return ((ep - cp) / ep) * 100.0
+
+    return 0.0
+
 class PaperPosition:
     """Represents a paper trading position with advanced management"""
 
@@ -55,6 +75,12 @@ class PaperPosition:
         self.trailing_stop_active = False
         self.trailing_stop_trigger = 0.02  # activate at 2% profit
 
+        # Branch B native exchange protection state mirrors the SQLite columns.
+        self.native_sl_active = False
+        self.native_tp_active = False
+        self.native_trail_active = False
+        self.native_sl_price = None
+
     def update_price(self, current_price):
         self.current_price = current_price
         if self.side == 'long':
@@ -65,11 +91,7 @@ class PaperPosition:
         avg_notional = ((self.entry_price + current_price) / 2.0) * self.quantity
         self.fee_cost = avg_notional * self.round_trip_fee_rate
         self.pnl = self.gross_pnl - self.fee_cost
-        entry_notional = self.entry_price * self.quantity
-        if entry_notional > 0:
-            self.pnl_percentage = (self.pnl / entry_notional) * 100
-        else:
-            self.pnl_percentage = 0.0
+        self.pnl_percentage = derive_pnl_pct(self.entry_price, self.current_price, self.side)
 
         # Track peak P&L percentage
         if self.pnl_percentage > self.peak_pnl_percentage:
@@ -241,6 +263,7 @@ class Aribot:
             self.db,
             self.logger,
             alert_dispatcher=self.dispatch_reconciliation_alert,
+            native_stop_executor=self.order_executor if self.live_execution_enabled else None,
         )
         if self.bot_mode in {'shadow', 'live'}:
             self.startup_reconciler.startup_gate()
@@ -346,7 +369,7 @@ class Aribot:
         )
         return True
 
-    def submit_market_order(self, symbol, side, quantity, reason, idempotency_key):
+    def submit_market_order(self, symbol, side, quantity, reason, idempotency_key, leverage=None):
         if self.order_executor is None:
             return False, None
 
@@ -356,6 +379,8 @@ class Aribot:
             side=side,
             amount=quantity,
             idempotency_key=idempotency_key,
+            order_reason=reason,
+            leverage=leverage,
         )
         if not result.success:
             self.logger.error(f"❌ Order failed for {symbol} ({reason}): {result.message}")
@@ -805,7 +830,11 @@ class Aribot:
                 current_price REAL,
                 pnl REAL,
                 pnl_percentage REAL,
-                partial_exits_json TEXT DEFAULT '[]'
+                partial_exits_json TEXT DEFAULT '[]',
+                native_sl_active INTEGER DEFAULT 0,
+                native_tp_active INTEGER DEFAULT 0,
+                native_trail_active INTEGER DEFAULT 0,
+                native_sl_price REAL
             )
         ''')
         cursor.execute('''
@@ -846,6 +875,14 @@ class Aribot:
         }
         if 'partial_exits_json' not in existing_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN partial_exits_json TEXT DEFAULT '[]'")
+        if 'native_sl_active' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN native_sl_active INTEGER DEFAULT 0")
+        if 'native_tp_active' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN native_tp_active INTEGER DEFAULT 0")
+        if 'native_trail_active' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN native_trail_active INTEGER DEFAULT 0")
+        if 'native_sl_price' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN native_sl_price REAL")
 
         self.db.commit()
 
@@ -954,6 +991,10 @@ class Aribot:
             pos.pnl = row['pnl']
             pos.pnl_percentage = row['pnl_percentage']
             pos.partial_exits = self.deserialize_partial_exits(row['partial_exits_json'])
+            pos.native_sl_active = bool(row['native_sl_active'])
+            pos.native_tp_active = bool(row['native_tp_active'])
+            pos.native_trail_active = bool(row['native_trail_active'])
+            pos.native_sl_price = row['native_sl_price']
             self.positions[pos.symbol] = pos
 
         self.closed_trades = []
@@ -1177,6 +1218,7 @@ class Aribot:
                 quantity=qty,
                 reason='entry',
                 idempotency_key=order_key,
+                leverage=leverage,
             )
             if not ok:
                 return False
@@ -1186,6 +1228,10 @@ class Aribot:
         pos.round_trip_fee_rate = self.round_trip_fee_rate
         self.positions[symbol] = pos
         self.persist_position(pos)
+
+        # Copilot prompt: Keep native-stop failures non-blocking; only persist flags confirmed by exchange.
+        self._apply_native_initial_protection(pos)
+
         self.total_trades += 1
         self.persist_runtime_state()
         self.logger.info(
@@ -1217,8 +1263,9 @@ class Aribot:
                 symbol, side, entry_price, quantity, timestamp,
                 stop_loss, trailing_stop_level, trailing_stop_active,
                 peak_pnl_percentage, current_price, pnl, pnl_percentage,
-                partial_exits_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                partial_exits_json, native_sl_active, native_tp_active,
+                native_trail_active, native_sl_price
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             pos.symbol,
             pos.side,
@@ -1232,9 +1279,71 @@ class Aribot:
             pos.current_price,
             pos.pnl,
             pos.pnl_percentage,
-            self.serialize_partial_exits(pos.partial_exits)
+            self.serialize_partial_exits(pos.partial_exits),
+            int(bool(getattr(pos, 'native_sl_active', False))),
+            int(bool(getattr(pos, 'native_tp_active', False))),
+            int(bool(getattr(pos, 'native_trail_active', False))),
+            getattr(pos, 'native_sl_price', None),
         ))
         self.db.commit()
+
+    def _apply_native_initial_protection(self, pos):
+        if not self.live_execution_enabled or self.order_executor is None:
+            return
+
+        result = self.order_executor.set_native_initial_protection(
+            symbol=pos.symbol,
+            side=pos.side,
+            entry_price=pos.entry_price,
+        )
+        pos.native_sl_active = bool(result.get('native_sl_active', False))
+        pos.native_tp_active = bool(result.get('native_tp_active', False))
+        pos.native_trail_active = bool(result.get('native_trail_active', False))
+        pos.native_sl_price = result.get('native_sl_price')
+        self.persist_position(pos)
+
+        if not result.get('ok', False):
+            self.logger.warning(
+                '⚠️ Native initial protection warning for %s: warnings=%s',
+                pos.symbol,
+                result.get('warnings', []),
+            )
+
+    def _apply_native_trailing_protection(self, pos):
+        if not self.live_execution_enabled or self.order_executor is None:
+            return
+
+        result = self.order_executor.set_native_trailing(pos.symbol)
+        if result.get('ok', False):
+            pos.native_sl_active = False
+            pos.native_tp_active = False
+            pos.native_trail_active = True
+            pos.native_sl_price = None
+            self.persist_position(pos)
+            return
+
+        self.logger.warning(
+            '⚠️ Native trailing protection warning for %s: warnings=%s',
+            pos.symbol,
+            result.get('warnings', []),
+        )
+
+    def _clear_native_protection_on_close(self, pos):
+        # Copilot prompt: Close flow must not block on exchange-stop cleanup; clear local flags regardless of API outcome.
+        if self.live_execution_enabled and self.order_executor is not None:
+            result = self.order_executor.clear_native_protection(pos.symbol)
+            if not result.get('ok', False):
+                self.logger.warning(
+                    '⚠️ Native protection clear warning for %s: warnings=%s',
+                    pos.symbol,
+                    result.get('warnings', []),
+                )
+
+        pos.native_sl_active = False
+        pos.native_tp_active = False
+        pos.native_trail_active = False
+        pos.native_sl_price = None
+        self.persist_position(pos)
 
     def remove_persisted_position(self, symbol):
         cursor = self.db.cursor()
@@ -1308,6 +1417,8 @@ class Aribot:
                 return
             pos.quantity = min(pos.quantity, filled_qty)
             pos.update_price(fill_price)
+
+        self._clear_native_protection_on_close(pos)
 
         self.current_balance += pos.pnl
         self.total_pnl += pos.pnl
@@ -1448,6 +1559,9 @@ class Aribot:
             if pos.should_activate_trailing_stop():
                 pos.activate_trailing_stop()
                 self.logger.info(f"🎯 TRAILING ACTIVATED {symbol} level={pos.trailing_stop_level:.8f}")
+                # Copilot prompt: When trailing activates, switch exchange protection from fixed SL/TP to trailing fallback.
+                self._apply_native_trailing_protection(pos)
+                self.persist_position(pos)
 
             if pos.trailing_stop_active and pos.update_trailing_stop():
                 self.logger.info(f"📈 TRAIL UPDATED {symbol} level={pos.trailing_stop_level:.8f}")
