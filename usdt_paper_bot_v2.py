@@ -199,7 +199,7 @@ class Aribot:
         self.positions = {}
         self.closed_trades = []
         self.kill_switch_file = os.getenv('KILL_SWITCH_FILE', 'kill_switch.flag')
-        self.initial_balance = 10000.0
+        self.initial_balance = 400.0
         self.current_balance = self.initial_balance
         self.total_pnl = 0.0
         self.total_trades = 0

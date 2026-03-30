@@ -13,6 +13,18 @@ This runbook defines the mandatory release sequence for moving from testnet to s
 
 Run this checklist at least once per launch window and capture command transcripts in evidence.
 
+Register Telegram command menu once per bot token and scope:
+
+```bash
+python deploy/register_telegram_commands.py
+```
+
+Optional preview without writing commands:
+
+```bash
+python deploy/register_telegram_commands.py --dry-run
+```
+
 ### Supported Command Surface (Exact Syntax)
 
 1. `/status`

@@ -192,6 +192,23 @@ Authorized operator chat can issue only the commands below:
 9. `/kill`
 10. `/config`
 
+One-time command-menu registration (recommended for new deployments):
+
+1. Run once after setting `TELEGRAM_BOT_TOKEN`:
+
+```bash
+python deploy/register_telegram_commands.py
+```
+
+2. Optional dry-run preview:
+
+```bash
+python deploy/register_telegram_commands.py --dry-run
+```
+
+Note: Telegram command menu entries are metadata and do not auto-populate from bot runtime code.
+You can still type commands manually even before menu registration.
+
 Command behavior:
 
 1. `/trades [n]`
