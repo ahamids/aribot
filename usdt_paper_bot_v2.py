@@ -2228,9 +2228,30 @@ class Aribot:
                 idempotency_key=order_key,
             )
             if not ok:
-                # Put the position back so it can be retried next cycle.
-                self.positions[symbol] = pos
-                return
+                # The close order was rejected. This most commonly happens because
+                # the native SL already fired (position is flat) and our reduceOnly
+                # order was correctly rejected. Check the live position size before
+                # deciding whether to retry.
+                live_size = None
+                if self.order_executor is not None:
+                    live_size = self.order_executor.fetch_live_position_size(symbol)
+
+                if live_size is not None and live_size <= 0.0:
+                    # Exchange confirms no open position — native SL already closed it.
+                    # Fall through to local accounting so the bot's state stays clean.
+                    self.logger.warning(
+                        f"⚠️ Close order rejected for {symbol} but exchange shows no open "
+                        f"position — native SL likely fired first. Cleaning up locally as "
+                        f"'native_sl_closed'. Local PnL may differ slightly from exchange; "
+                        f"next balance sync will reconcile."
+                    )
+                    reason = 'native_sl_closed'
+                    # Use current tracked price as best-effort exit price.
+                else:
+                    # Genuine failure or API error (live_size is None) — re-queue for
+                    # retry next cycle. Do NOT fall through to accounting.
+                    self.positions[symbol] = pos
+                    return
 
             fill_price, filled_qty = self.extract_order_fill(
                 order_data,

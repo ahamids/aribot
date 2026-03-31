@@ -158,12 +158,19 @@ class OrderExecutor:
                     raise LeverageSetError(f'Entry order missing leverage for {symbol}')
                 self._ensure_leverage(symbol, leverage)
 
+            # Non-entry orders (exits, partials) must be reduceOnly so that a race
+            # against a native SL cannot open an unintended counter-position.
+            order_params: dict = {}
+            if order_reason != 'entry':
+                order_params['reduceOnly'] = True
+
             order = self.exchange.create_order(
                 symbol=symbol,
                 type=order_type,
                 side=side,
                 amount=amount,
-                price=price
+                price=price,
+                params=order_params,
             )
 
             finalized = self._finalize_exchange_order(symbol, order)
@@ -410,6 +417,22 @@ class OrderExecutor:
     def clear_native_protection(self, symbol: str) -> Dict[str, Any]:
         """Backward-compatible alias for clearing all native stops."""
         return self.cancel_all_native_stops(symbol)
+
+    def fetch_live_position_size(self, symbol: str) -> Optional[float]:
+        """Return the absolute live position contracts for symbol from the exchange.
+
+        Returns 0.0 when the position is confirmed flat, None when the fetch
+        fails (caller should treat None as unknown and not assume flat).
+        """
+        try:
+            position = self.exchange.fetch_position(symbol)
+            contracts = position.get('contracts') if isinstance(position, dict) else None
+            if contracts is None:
+                return None
+            return abs(float(contracts))
+        except Exception as exc:
+            logger.warning('Could not fetch live position size for %s: %s', symbol, str(exc))
+            return None
 
     def ensure_native_protection_for_position(
         self,
