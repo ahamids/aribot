@@ -19,6 +19,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from alert_dispatcher import AlertDispatcher
+from emoji_mode import EmojiLogFilter, normalize_emoji_mode, parse_emoji_mode_args
 from observability import FundingTracker, KillSwitchMonitor, StructuredEventLogger
 from order_executor import OrderExecutor
 from secret_loader import SecretLoader, SecretValidationError
@@ -166,8 +167,9 @@ class PaperPosition:
 
 
 class Aribot:
-    def __init__(self, startup_secrets=None):
-        self.setup_logging()
+    def __init__(self, startup_secrets=None, emoji_mode='noemojis'):
+        self.emoji_mode = normalize_emoji_mode(emoji_mode)
+        self.setup_logging(emoji_mode=self.emoji_mode)
         self.bot_mode = str(getattr(startup_secrets, 'bot_mode', os.getenv('BOT_MODE', 'paper'))).strip().lower()
         self.live_execution_enabled = self.bot_mode in {'shadow', 'live'}
         self.telegram_verify_on_start = str(os.getenv('TELEGRAM_VERIFY_ON_START', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -821,18 +823,21 @@ class Aribot:
             return self.mid_cap_leverage, 'mid_cap'
         return self.default_leverage, 'default'
 
-    def setup_logging(self):
+    def setup_logging(self, emoji_mode='noemojis'):
         self.logger = logging.getLogger('Aribot')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+        emoji_filter = EmojiLogFilter(emoji_mode=emoji_mode)
 
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
+        console_handler.addFilter(emoji_filter)
 
         file_handler = logging.FileHandler('usdt_trading_log.txt', mode='a')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(emoji_filter)
 
         self.logger.addHandler(console_handler)
         self.logger.addHandler(file_handler)
@@ -2452,6 +2457,7 @@ PaperTradingBotV2 = Aribot
 
 if __name__ == '__main__':
     load_dotenv(override=True)
+    emoji_mode, _ = parse_emoji_mode_args(sys.argv[1:])
     try:
         startup_secret_loader = SecretLoader()
         startup_secrets = startup_secret_loader.load()
@@ -2466,7 +2472,7 @@ if __name__ == '__main__':
         raise SystemExit(2)
 
     try:
-        bot = Aribot(startup_secrets=startup_secrets)
+        bot = Aribot(startup_secrets=startup_secrets, emoji_mode=emoji_mode)
         bot.verify_telegram_readiness()
     except RuntimeError as exc:
         print(f"Startup readiness failed: {exc}")

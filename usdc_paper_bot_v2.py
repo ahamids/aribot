@@ -11,7 +11,10 @@ import time
 import datetime
 import logging
 import json
+import sys
 from pathlib import Path
+
+from emoji_mode import EmojiLogFilter, normalize_emoji_mode, parse_emoji_mode_args
 
 class PaperPosition:
     """Represents a paper trading position with advanced management"""
@@ -133,8 +136,9 @@ class PaperPosition:
 
 
 class Aribot:
-    def __init__(self):
-        self.setup_logging()
+    def __init__(self, emoji_mode='noemojis'):
+        self.emoji_mode = normalize_emoji_mode(emoji_mode)
+        self.setup_logging(emoji_mode=self.emoji_mode)
         self.exchange = ccxt.bybit()
         self.positions = {}
         self.closed_trades = []
@@ -499,18 +503,21 @@ class Aribot:
             return self.mid_cap_leverage, 'mid_cap'
         return self.default_leverage, 'default'
 
-    def setup_logging(self):
+    def setup_logging(self, emoji_mode='noemojis'):
         self.logger = logging.getLogger('Aribot')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+        emoji_filter = EmojiLogFilter(emoji_mode=emoji_mode)
 
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
+        console_handler.addFilter(emoji_filter)
 
         file_handler = logging.FileHandler('usdc_paper_trading_log.txt', mode='a')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(emoji_filter)
 
         self.logger.addHandler(console_handler)
         self.logger.addHandler(file_handler)
@@ -975,7 +982,8 @@ PaperTradingBotV2 = Aribot
 
 
 if __name__ == '__main__':
-    bot = Aribot()
+    emoji_mode, _ = parse_emoji_mode_args(sys.argv[1:])
+    bot = Aribot(emoji_mode=emoji_mode)
     try:
         bot.run()
     except KeyboardInterrupt:

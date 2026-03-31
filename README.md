@@ -2,6 +2,17 @@
 
 Aribot runs from `usdt_paper_bot_v2.py` and trades Bybit perpetuals using a 4h strategy.
 
+Emoji output mode:
+- Default is `noemojis` (no emoji characters in console/text log output).
+- Use `--emojis` to keep emoji output enabled.
+- JSON structured logging in `observability.jsonl` is unchanged by this flag.
+
+Examples:
+- `python usdt_paper_bot_v2.py`
+- `python usdt_paper_bot_v2.py --emojis`
+- `python usdc_paper_bot_v2.py`
+- `python usdc_paper_bot_v2.py --emojis`
+
 This README is operator-focused and reflects implemented behavior in code.
 
 ## Quickstart
