@@ -566,7 +566,8 @@ def seed_positions_db(db_path: Path, symbol: str = 'TEST/USDT:USDT') -> None:
                 native_sl_active INTEGER DEFAULT 0,
                 native_tp_active INTEGER DEFAULT 0,
                 native_trail_active INTEGER DEFAULT 0,
-                native_sl_price REAL
+                native_sl_price REAL,
+                native_stops_cancelled_at TEXT
             )
             '''
         )
@@ -594,8 +595,8 @@ def seed_positions_db(db_path: Path, symbol: str = 'TEST/USDT:USDT') -> None:
                 stop_loss, trailing_stop_level, trailing_stop_active,
                 peak_pnl_percentage, current_price, pnl, pnl_percentage,
                 partial_exits_json, native_sl_active, native_tp_active,
-                native_trail_active, native_sl_price
-            ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, 0, ?, 0, 0, '[]', 0, 0, 0, NULL)
+                native_trail_active, native_sl_price, native_stops_cancelled_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, 0, ?, 0, 0, '[]', 0, 0, 0, NULL, NULL)
             ''',
             (
                 symbol,
@@ -2088,6 +2089,9 @@ def test_27_telegram_status_runtime_snapshot_fields_and_cooldown_state() -> tupl
         'mode',
         'regime_direction',
         'session_pnl',
+        'current_balance',
+        'wins',
+        'losses',
         'cycle_count',
         'drawdown_pct',
         'cooldown_active',
@@ -2128,7 +2132,7 @@ def test_28_telegram_positions_output_empty_and_multi_position_rows() -> tuple[s
             return True
 
     bot, _ = _build_telegram_test_bot(SinkDispatcher(), authorized_chat_id='111')
-    if bot.format_positions_command_text() != 'No open positions.':
+    if bot.format_positions_command_text() != 'Positions (0) — none open':
         return 'FAIL', f'Unexpected empty /positions output: {bot.format_positions_command_text()}'
 
     ts = datetime.datetime.now()

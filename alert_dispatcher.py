@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -50,6 +51,29 @@ class AlertDispatcher:
         except requests.RequestException as exc:
             self.logger.warning('Telegram alert dispatch failed: %s', exc)
             return False
+
+    def send_pulse(self, status_data: Dict[str, Any]) -> bool:
+        """Send scheduled heartbeat pulse through the standard Telegram path."""
+        now_utc = status_data.get('time_utc')
+        if not isinstance(now_utc, datetime.datetime):
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=datetime.timezone.utc)
+        else:
+            now_utc = now_utc.astimezone(datetime.timezone.utc)
+
+        mode = str(status_data.get('mode') or 'unknown')
+        positions = int(status_data.get('positions') or 0)
+        balance = float(status_data.get('balance') or 0.0)
+        session_pnl = float(status_data.get('session_pnl') or 0.0)
+        entries_state = str(status_data.get('entries_state') or 'unknown')
+
+        text = (
+            f"[Pulse {now_utc:%H:%M} UTC]\n"
+            f"Mode: {mode} | Positions: {positions} | Balance: ${balance:,.2f}\n"
+            f"Session PnL: {session_pnl:+.2f} | Entries: {entries_state}"
+        )
+        return self.send_message(text)
 
     def verify_delivery(self, probe_text: str) -> bool:
         """Run an end-to-end Telegram verification: bot auth + message delivery."""

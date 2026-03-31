@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import sys
 from typing import Iterable, List, Optional, Tuple
 
 
@@ -13,6 +14,7 @@ from typing import Iterable, List, Optional, Tuple
 _EMOJI_PATTERN = re.compile(
     "["
     "\U0001F000-\U0001FAFF"
+    "\U00002300-\U000023FF"
     "\U00002600-\U000027BF"
     "\U0001F1E6-\U0001F1FF"
     "]+",
@@ -54,6 +56,26 @@ def parse_emoji_mode_args(argv: Optional[Iterable[str]] = None) -> Tuple[str, Li
     parsed, remaining = parser.parse_known_args(list(argv or []))
     mode = "emojis" if parsed.emojis else "noemojis"
     return mode, remaining
+
+
+class SafeStreamHandler(logging.StreamHandler):
+    """Stream handler that degrades unsupported characters instead of failing."""
+
+    def __init__(self, stream=None) -> None:
+        super().__init__(stream or sys.stderr)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            encoding = getattr(stream, 'encoding', None) or 'utf-8'
+            safe_msg = msg.encode(encoding, errors='replace').decode(encoding, errors='replace')
+            stream.write(safe_msg + self.terminator)
+            self.flush()
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
 
 
 class EmojiLogFilter(logging.Filter):

@@ -9,12 +9,8 @@ import ccxt
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
-# Configure structured logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 @dataclass
@@ -382,36 +378,38 @@ class OrderExecutor:
             'native_sl_price': None,
         }
 
-    def clear_native_protection(self, symbol: str) -> Dict[str, Any]:
-        """Clear all native stop settings; never raises on failure."""
+    def cancel_all_native_stops(self, symbol: str) -> Dict[str, Any]:
+        """Clear stopLoss/takeProfit/trailingStop in one idempotent request."""
         zero_payload = {
             'stopLoss': '0',
             'takeProfit': '0',
             'trailingStop': '0',
             'positionIdx': 0,
         }
-        none_payload = {
-            'stopLoss': None,
-            'takeProfit': None,
-            'trailingStop': None,
-            'positionIdx': 0,
-        }
 
-        primary = self._set_trading_stop_safe(symbol, operation='clear_all', payload=zero_payload)
-        fallback = {'ok': False, 'warnings': []}
-        if not primary['ok']:
-            fallback = self._set_trading_stop_safe(symbol, operation='clear_all_fallback_none', payload=none_payload)
+        result = self._set_trading_stop_safe(symbol, operation='cancel_all_native_stops', payload=zero_payload)
+        if result.get('ok', False):
+            logger.info('Native stop cancel confirmed for %s', symbol)
+        else:
+            logger.warning(
+                'Native stop cancel warning for %s: warnings=%s',
+                symbol,
+                result.get('warnings', []),
+            )
 
-        warnings = primary['warnings'] + fallback['warnings']
         return {
-            'ok': bool(primary['ok'] or fallback['ok']),
-            'operation': 'clear_all',
-            'warnings': warnings,
+            'ok': bool(result.get('ok', False)),
+            'operation': 'cancel_all_native_stops',
+            'warnings': result.get('warnings', []),
             'native_sl_active': False,
             'native_tp_active': False,
             'native_trail_active': False,
             'native_sl_price': None,
         }
+
+    def clear_native_protection(self, symbol: str) -> Dict[str, Any]:
+        """Backward-compatible alias for clearing all native stops."""
+        return self.cancel_all_native_stops(symbol)
 
     def ensure_native_protection_for_position(
         self,
@@ -464,6 +462,8 @@ class OrderExecutor:
         """Map internal payload fields to CCXT create_order trading-stop params."""
         params: Dict[str, Any] = {
             'tradingStopEndpoint': True,
+            # Belt-and-suspenders safety: native stops should never open new exposure.
+            'reduceOnly': True,
         }
 
         if 'positionIdx' in payload and payload['positionIdx'] is not None:

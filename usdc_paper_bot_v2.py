@@ -14,7 +14,7 @@ import json
 import sys
 from pathlib import Path
 
-from emoji_mode import EmojiLogFilter, normalize_emoji_mode, parse_emoji_mode_args
+from emoji_mode import EmojiLogFilter, SafeStreamHandler, normalize_emoji_mode, parse_emoji_mode_args
 
 class PaperPosition:
     """Represents a paper trading position with advanced management"""
@@ -506,15 +506,17 @@ class Aribot:
     def setup_logging(self, emoji_mode='noemojis'):
         self.logger = logging.getLogger('Aribot')
         self.logger.setLevel(logging.INFO)
+        self.logger.handlers.clear()
+        self.logger.propagate = False
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         emoji_filter = EmojiLogFilter(emoji_mode=emoji_mode)
 
-        console_handler = logging.StreamHandler()
+        console_handler = SafeStreamHandler()
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         console_handler.addFilter(emoji_filter)
 
-        file_handler = logging.FileHandler('usdc_paper_trading_log.txt', mode='a')
+        file_handler = logging.FileHandler('usdc_paper_trading_log.txt', mode='a', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         file_handler.addFilter(emoji_filter)

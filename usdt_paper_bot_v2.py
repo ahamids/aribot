@@ -19,7 +19,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from alert_dispatcher import AlertDispatcher
-from emoji_mode import EmojiLogFilter, normalize_emoji_mode, parse_emoji_mode_args
+from emoji_mode import EmojiLogFilter, SafeStreamHandler, normalize_emoji_mode, parse_emoji_mode_args
 from observability import FundingTracker, KillSwitchMonitor, StructuredEventLogger
 from order_executor import OrderExecutor
 from secret_loader import SecretLoader, SecretValidationError
@@ -81,6 +81,7 @@ class PaperPosition:
         self.native_tp_active = False
         self.native_trail_active = False
         self.native_sl_price = None
+        self.native_stops_cancelled_at = None
 
     def update_price(self, current_price):
         self.current_price = current_price
@@ -160,7 +161,12 @@ class PaperPosition:
         return partial_pnl
 
     def age_minutes(self):
-        return (datetime.datetime.now() - self.timestamp).total_seconds() / 60.0
+        timestamp = self.timestamp
+        if isinstance(timestamp, datetime.datetime) and timestamp.tzinfo is not None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            ts_utc = timestamp.astimezone(datetime.timezone.utc)
+            return (now_utc - ts_utc).total_seconds() / 60.0
+        return (datetime.datetime.now() - timestamp).total_seconds() / 60.0
 
     def should_close_for_time(self, max_minutes=1440):
         return self.age_minutes() >= max_minutes
@@ -248,6 +254,8 @@ class Aribot:
         self.last_regime_signal = 'UNKNOWN'
         self.tick_observations = {}
         self.timestamp_fallback_warned = set()
+        self.pulse_interval_seconds = 60 * 60
+        self.last_pulse_sent_at_utc = None
 
         self.markets = self.exchange.load_markets()
         self.usdc_swaps = [symbol for symbol in self.markets.keys() if self.markets[symbol].get('type') == 'swap' and 'USDT' in symbol]
@@ -292,6 +300,7 @@ class Aribot:
             self.request_clean_shutdown,
         )
         self.load_state()
+        self.last_pulse_sent_at_utc = self._safe_utc_from_iso(self.get_state_value('last_pulse_sent_at'))
         balance_synced = self.sync_account_balance(force=False)
         if balance_synced:
             self.rebase_daily_drawdown_baseline_after_live_sync()
@@ -712,17 +721,18 @@ class Aribot:
                 },
             )
 
-    def in_loss_cooldown(self):
+    def in_loss_cooldown(self, now_utc=None):
         if self.cooldown_until_utc is None:
             return False
-        return datetime.datetime.now(datetime.timezone.utc) < self.cooldown_until_utc
+        ref_now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        return ref_now < self.cooldown_until_utc
 
-    def entry_gate_block_reason(self):
+    def entry_gate_block_reason(self, now_utc=None):
         if self.manual_entry_paused:
             return 'manual_pause'
         if self.daily_drawdown_paused:
             return 'daily_drawdown_pause'
-        if self.in_loss_cooldown():
+        if self.in_loss_cooldown(now_utc=now_utc):
             return 'loss_cooldown'
         return None
 
@@ -826,15 +836,17 @@ class Aribot:
     def setup_logging(self, emoji_mode='noemojis'):
         self.logger = logging.getLogger('Aribot')
         self.logger.setLevel(logging.INFO)
+        self.logger.handlers.clear()
+        self.logger.propagate = False
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         emoji_filter = EmojiLogFilter(emoji_mode=emoji_mode)
 
-        console_handler = logging.StreamHandler()
+        console_handler = SafeStreamHandler()
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         console_handler.addFilter(emoji_filter)
 
-        file_handler = logging.FileHandler('usdt_trading_log.txt', mode='a')
+        file_handler = logging.FileHandler('usdt_trading_log.txt', mode='a', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         file_handler.addFilter(emoji_filter)
@@ -862,7 +874,8 @@ class Aribot:
                 native_sl_active INTEGER DEFAULT 0,
                 native_tp_active INTEGER DEFAULT 0,
                 native_trail_active INTEGER DEFAULT 0,
-                native_sl_price REAL
+                native_sl_price REAL,
+                native_stops_cancelled_at TEXT
             )
         ''')
         cursor.execute('''
@@ -911,6 +924,8 @@ class Aribot:
             cursor.execute("ALTER TABLE positions ADD COLUMN native_trail_active INTEGER DEFAULT 0")
         if 'native_sl_price' not in existing_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN native_sl_price REAL")
+        if 'native_stops_cancelled_at' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN native_stops_cancelled_at TEXT")
 
         self.db.commit()
 
@@ -1246,6 +1261,9 @@ class Aribot:
             'mode': str(self.bot_mode or 'unknown'),
             'regime_direction': str(self.last_regime_signal or 'UNKNOWN'),
             'session_pnl': float(self.current_balance - self.session_start_balance),
+            'current_balance': float(self.current_balance),
+            'wins': int(self.winning_trades),
+            'losses': int(self.losing_trades),
             'cycle_count': int(self.loop_cycle_count),
             'drawdown_pct': float(self._compute_session_drawdown_pct()),
             'cooldown_active': bool(cooldown_active),
@@ -1261,16 +1279,19 @@ class Aribot:
 
         return (
             'Status\n'
-            f"mode={snap['mode']} regime={snap['regime_direction']} cycle={snap['cycle_count']}\n"
-            f"session_pnl={snap['session_pnl']:+.2f} drawdown={snap['drawdown_pct']:+.2f}%\n"
-            f"cooldown={cooldown_text}"
+            f"Mode: {snap['mode']} | Regime: {snap['regime_direction']} | Cycle: {snap['cycle_count']}\n"
+            f"Session PnL: {snap['session_pnl']:+.2f}\n"
+            f"Balance: ${snap['current_balance']:.2f}\n"
+            f"Wins: {snap['wins']}  Losses: {snap['losses']}\n"
+            f"Drawdown: {snap['drawdown_pct']:+.2f}%\n"
+            f"Cooldown: {cooldown_text}"
         )
 
     def format_positions_command_text(self):
         if not self.positions:
-            return 'No open positions.'
+            return 'Positions (0) — none open'
 
-        lines = ['Positions']
+        lines = [f'Positions ({len(self.positions)})']
         for symbol in sorted(self.positions.keys()):
             pos = self.positions[symbol]
             trail_active = 'yes' if pos.trailing_stop_active else 'no'
@@ -1279,6 +1300,60 @@ class Aribot:
                 f"pnl={pos.pnl_percentage:+.2f}% trail={trail_active}"
             )
         return '\n'.join(lines)
+
+    def _build_pulse_snapshot(self, now_utc=None):
+        ref_now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        gate_reason = self.entry_gate_block_reason(now_utc=ref_now)
+        entries_state = 'active' if gate_reason is None else 'paused'
+        return {
+            'time_utc': ref_now,
+            'mode': str(self.bot_mode or 'unknown'),
+            'positions': int(len(self.positions)),
+            'balance': float(self.current_balance),
+            'session_pnl': float(self.current_balance - self.session_start_balance),
+            'entries_state': entries_state,
+            'pause_reason': gate_reason,
+        }
+
+    def _should_send_pulse(self, now_utc):
+        last_sent = self.last_pulse_sent_at_utc
+        if last_sent is None:
+            return True
+        elapsed_seconds = (now_utc - last_sent).total_seconds()
+        return elapsed_seconds >= self.pulse_interval_seconds
+
+    def maybe_send_scheduled_pulse(self, *, trigger, now_utc=None):
+        ref_now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        if not self._should_send_pulse(ref_now):
+            return False
+
+        pulse_data = self._build_pulse_snapshot(now_utc=ref_now)
+        send_pulse = getattr(self.alert_dispatcher, 'send_pulse', None)
+        if callable(send_pulse):
+            pulse_ok = send_pulse(pulse_data)
+        else:
+            pulse_ok = bool(self.alert_dispatcher.send_message('Pulse unavailable: dispatcher missing send_pulse implementation.'))
+        if not pulse_ok:
+            self.logger.warning('⚠️ Scheduled pulse send failed (trigger=%s).', trigger)
+            self.emit_structured_event(
+                'WARNING',
+                'telegram_pulse_send_failed',
+                'telegram',
+                'Scheduled pulse send failed.',
+                values={'trigger': trigger},
+            )
+            return False
+
+        self.last_pulse_sent_at_utc = ref_now
+        self.set_state_value('last_pulse_sent_at', ref_now.isoformat())
+        self.emit_structured_event(
+            'INFO',
+            'telegram_pulse_sent',
+            'telegram',
+            'Scheduled pulse sent.',
+            values={'trigger': trigger, 'sent_at_utc': ref_now.isoformat()},
+        )
+        return True
 
     @staticmethod
     def _utc_today_iso(now_utc=None):
@@ -1635,6 +1710,7 @@ class Aribot:
             pos.native_tp_active = bool(row['native_tp_active'])
             pos.native_trail_active = bool(row['native_trail_active'])
             pos.native_sl_price = row['native_sl_price']
+            pos.native_stops_cancelled_at = row['native_stops_cancelled_at'] if 'native_stops_cancelled_at' in row.keys() else None
             self.positions[pos.symbol] = pos
 
         self.closed_trades = []
@@ -1998,8 +2074,8 @@ class Aribot:
                 stop_loss, trailing_stop_level, trailing_stop_active,
                 peak_pnl_percentage, current_price, pnl, pnl_percentage,
                 partial_exits_json, native_sl_active, native_tp_active,
-                native_trail_active, native_sl_price
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                native_trail_active, native_sl_price, native_stops_cancelled_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             pos.symbol,
             pos.side,
@@ -2018,6 +2094,7 @@ class Aribot:
             int(bool(getattr(pos, 'native_tp_active', False))),
             int(bool(getattr(pos, 'native_trail_active', False))),
             getattr(pos, 'native_sl_price', None),
+            getattr(pos, 'native_stops_cancelled_at', None),
         ))
         self.db.commit()
 
@@ -2065,8 +2142,21 @@ class Aribot:
 
     def _clear_native_protection_on_close(self, pos):
         # Copilot prompt: Close flow must not block on exchange-stop cleanup; clear local flags regardless of API outcome.
+        cancelled_at = None
         if self.live_execution_enabled and self.order_executor is not None:
-            result = self.order_executor.clear_native_protection(pos.symbol)
+            cancel_method = getattr(self.order_executor, 'cancel_all_native_stops', None)
+            if not callable(cancel_method):
+                cancel_method = getattr(self.order_executor, 'clear_native_protection', None)
+
+            if callable(cancel_method):
+                result = cancel_method(pos.symbol)
+            else:
+                result = {
+                    'ok': False,
+                    'warnings': [{'operation': 'cancel_all_native_stops', 'error_type': 'missing_method', 'error': 'No native stop cancel method available'}],
+                }
+            if result.get('ok', False):
+                cancelled_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
             if not result.get('ok', False):
                 self.logger.warning(
                     '⚠️ Native protection clear warning for %s: warnings=%s',
@@ -2078,6 +2168,7 @@ class Aribot:
         pos.native_tp_active = False
         pos.native_trail_active = False
         pos.native_sl_price = None
+        pos.native_stops_cancelled_at = cancelled_at
         self.persist_position(pos)
 
     def remove_persisted_position(self, symbol):
@@ -2269,6 +2360,8 @@ class Aribot:
                             },
                         )
                         self.persist_position(pos)
+                        if pos.quantity <= 0:
+                            to_close.append((symbol, 'partial_exit_complete'))
                         continue
 
                 partial_pnl = pos.take_partial_profit(idx, level)
@@ -2290,6 +2383,9 @@ class Aribot:
                     },
                 )
                 self.persist_position(pos)
+                if pos.quantity <= 0:
+                    to_close.append((symbol, 'partial_exit_complete'))
+                    continue
 
             if pos.should_activate_trailing_stop():
                 pos.activate_trailing_stop()
@@ -2352,6 +2448,8 @@ class Aribot:
             self.persist_runtime_state()
             return
 
+        self.maybe_send_scheduled_pulse(trigger='startup')
+
         cycle = 0
         while True:
             loop_started_at = time.perf_counter()
@@ -2367,6 +2465,7 @@ class Aribot:
             cycle += 1
             self.loop_cycle_count = cycle
             self.logger.info(f"\n🔄 Cycle {cycle} @ {datetime.datetime.now()}")
+            self.maybe_send_scheduled_pulse(trigger='loop')
             self.poll_telegram_commands_once(cycle)
             self.sync_account_balance(force=False)
             self.reset_daily_session_if_needed()

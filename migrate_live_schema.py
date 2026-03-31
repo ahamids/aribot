@@ -16,6 +16,7 @@ POSITIONS_ADDITIONAL_COLUMNS = {
     "native_tp_active": "INTEGER DEFAULT 0",
     "native_trail_active": "INTEGER DEFAULT 0",
     "native_sl_price": "REAL",
+    "native_stops_cancelled_at": "TEXT",
 }
 
 
