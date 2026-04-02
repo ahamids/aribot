@@ -32,7 +32,6 @@ class OrderExecutor:
 
     NATIVE_STOP_LOSS_PCT = 0.025
     NATIVE_TAKE_PROFIT_PCT = 0.05
-    NATIVE_TP_PARTIAL_SIZE = 0.30
     NATIVE_TRAILING_CALLBACK = '0.015'
 
     IDEMPOTENCY_DDL = '''
@@ -322,7 +321,9 @@ class OrderExecutor:
             'takeProfit': str(tp_price),
             'positionIdx': 0,
         }
-        tp_amount = self._resolve_partial_tp_amount(symbol, quantity)
+        # Native TP is a full-position fallback only; strategy partials are handled
+        # by explicit reduce-only market exits in the bot loop.
+        tp_amount = None
 
         sl_result = self._set_trading_stop_safe(
             symbol,
@@ -448,38 +449,8 @@ class OrderExecutor:
         return self.set_native_initial_protection(symbol, side, entry_price, quantity)
 
     def _resolve_partial_tp_amount(self, symbol: str, quantity: Optional[float]) -> Optional[float]:
-        """Resolve a partial TP size from known quantity or live position contracts."""
-        base_qty = None
-        if quantity is not None:
-            try:
-                candidate = abs(float(quantity))
-                if candidate > 0:
-                    base_qty = candidate
-            except (TypeError, ValueError):
-                base_qty = None
-
-        if base_qty is None:
-            try:
-                position = self.exchange.fetch_position(symbol)
-                contracts = position.get('contracts') if isinstance(position, dict) else None
-                if contracts is not None:
-                    candidate = abs(float(contracts))
-                    if candidate > 0:
-                        base_qty = candidate
-            except Exception as exc:
-                logger.info('Could not resolve live position size for partial TP on %s: %s', symbol, str(exc))
-
-        if base_qty is None:
-            return None
-
-        partial_ratio = float(self.NATIVE_TP_PARTIAL_SIZE)
-        if partial_ratio <= 0:
-            return None
-        if partial_ratio > 1:
-            partial_ratio = 1.0
-
-        partial_qty = base_qty * partial_ratio
-        return partial_qty if partial_qty > 0 else None
+        """Legacy helper retained for compatibility; native TP is full-position only."""
+        return None
 
     def _build_ccxt_trading_stop_params(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Map internal payload fields to CCXT create_order trading-stop params."""
@@ -498,17 +469,29 @@ class OrderExecutor:
         if 'stopLoss' in payload:
             value = payload['stopLoss']
             if value is not None:
-                params['stopLossPrice'] = str(value)
+                value_str = str(value).strip().lower()
+                if value_str in {'0', '0.0'}:
+                    params['stopLoss'] = '0'
+                else:
+                    params['stopLossPrice'] = str(value)
 
         if 'takeProfit' in payload:
             value = payload['takeProfit']
             if value is not None:
-                params['takeProfitPrice'] = str(value)
+                value_str = str(value).strip().lower()
+                if value_str in {'0', '0.0'}:
+                    params['takeProfit'] = '0'
+                else:
+                    params['takeProfitPrice'] = str(value)
 
         if 'trailingStop' in payload:
             value = payload['trailingStop']
             if value is not None:
-                params['trailingAmount'] = str(value)
+                value_str = str(value).strip().lower()
+                if value_str in {'0', '0.0'}:
+                    params['trailingStop'] = '0'
+                else:
+                    params['trailingAmount'] = str(value)
 
         return params
 

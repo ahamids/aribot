@@ -7,7 +7,7 @@
     ]
   },
   "large_alt": {
-    "leverage": 3,
+    "leverage": 4,
     "symbols": [
       "1000PEPE",
       "ADA",
@@ -33,7 +33,7 @@
     ]
   },
   "mid_cap": {
-    "leverage": 2,
+    "leverage": 3,
     "symbols": [
       "1000BONK",
       "AAVE",
@@ -76,5 +76,5 @@
       "ZRO"
     ]
   },
-  "default_leverage": 1
+  "default_leverage": 2
 }

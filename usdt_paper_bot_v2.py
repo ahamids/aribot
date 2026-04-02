@@ -68,7 +68,7 @@ class PaperPosition:
 
         # Revised partial profit settings from improvement report
         self.profit_taking_levels = [0.02, 0.03, 0.05]  # 2%, 3%, 5%
-        self.profit_taking_sizes = [0.30, 0.30, 0.40]   # 30%, 30%, 40%
+        self.profit_taking_sizes = [0.25, 0.25, 0.25]   # 25%, 25%, 25%
         self.partial_exits = []
 
         # Revised trailing stop settings from improvement report
@@ -614,7 +614,7 @@ class Aribot:
 
             ohlc4_values = self.calculate_ohlc4(ohlcv)
             current_ohlc4 = ohlc4_values[-1]
-            btc_wma_200 = self.calculate_wma(ohlc4_values, period=200, offset=0)
+            btc_wma_200 = self.calculate_wma(ohlc4_values, period=45, offset=0)
             if btc_wma_200 is None:
                 self.logger.warning(
                     f"⚠️ BTC regime WMA-200 calculation returned None for {self.btc_regime_symbol}"
@@ -2212,12 +2212,12 @@ class Aribot:
         ))
         self.db.commit()
 
-    def close_position(self, symbol, reason):
+    def close_position(self, symbol, reason, exchange_already_closed=False):
         pos = self.positions.pop(symbol, None)
         if not pos:
             return
 
-        if self.live_execution_enabled and pos.quantity > 0:
+        if self.live_execution_enabled and pos.quantity > 0 and not exchange_already_closed:
             exit_side = 'sell' if pos.side == 'long' else 'buy'
             order_key = f"exit:{symbol}:{exit_side}:{int(time.time() // 60)}:{reason}"
             ok, order_data = self.submit_market_order(
@@ -2313,8 +2313,110 @@ class Aribot:
                 'fees': pos.fee_cost,
                 'net_pnl': pos.pnl,
                 'pnl_percentage': pos.pnl_percentage,
+                'exchange_already_closed': bool(exchange_already_closed),
             },
         )
+
+    def reconcile_runtime_positions_with_exchange(self):
+        if not self.live_execution_enabled:
+            return
+
+        if not self.positions:
+            return
+
+        try:
+            exchange_positions = self.startup_reconciler.fetch_open_exchange_positions()
+        except Exception as exc:
+            self.logger.warning(f"⚠️ Runtime reconciliation skipped: failed to fetch exchange positions ({type(exc).__name__}: {exc})")
+            return
+
+        local_symbols = list(self.positions.keys())
+        exchange_symbols = set(exchange_positions.keys())
+
+        for symbol in local_symbols:
+            pos = self.positions.get(symbol)
+            if pos is None:
+                continue
+
+            ex_pos = exchange_positions.get(symbol)
+            if ex_pos is None:
+                reconstructed_close = self.startup_reconciler.reconstruct_close_from_trades(
+                    symbol=symbol,
+                    side=pos.side,
+                    open_quantity=pos.quantity,
+                )
+                if reconstructed_close is not None and reconstructed_close > 0:
+                    pos.update_price(reconstructed_close)
+                    self.persist_position(pos)
+
+                self.logger.warning(
+                    f"⚠️ Runtime reconciliation detected local-only open position for {symbol}; "
+                    f"closing locally (exchange already flat)."
+                )
+                self.emit_structured_event(
+                    'WARNING',
+                    'runtime_local_missing_on_exchange',
+                    'reconciliation',
+                    'Runtime reconciliation found local open position missing on exchange; local state was closed.',
+                    symbol=symbol,
+                    values={
+                        'reconstructed_close_price': reconstructed_close,
+                    },
+                )
+                self.close_position(symbol, 'runtime_exchange_flat_reconciled', exchange_already_closed=True)
+                continue
+
+            try:
+                exchange_qty = abs(float(ex_pos.get('quantity') or 0.0))
+            except (TypeError, ValueError):
+                exchange_qty = 0.0
+
+            if exchange_qty <= 0.0:
+                continue
+
+            local_qty = abs(float(pos.quantity or 0.0))
+            qty_diff_pct = abs(local_qty - exchange_qty) / max(local_qty, exchange_qty, 1e-12) * 100.0
+
+            exchange_entry_raw = ex_pos.get('entry_price')
+            try:
+                exchange_entry = float(exchange_entry_raw or 0.0)
+            except (TypeError, ValueError):
+                exchange_entry = 0.0
+
+            exchange_side = str(ex_pos.get('side') or '').strip().lower()
+            if exchange_side == 'buy':
+                exchange_side = 'long'
+            elif exchange_side == 'sell':
+                exchange_side = 'short'
+
+            if qty_diff_pct > 1.0:
+                self.logger.warning(
+                    f"⚠️ Runtime reconciliation quantity mismatch for {symbol}: "
+                    f"local={local_qty:.8f}, exchange={exchange_qty:.8f}. Updating local state to exchange truth."
+                )
+                pos.quantity = exchange_qty
+                if exchange_entry > 0.0:
+                    pos.entry_price = exchange_entry
+                if exchange_side in {'long', 'short'}:
+                    pos.side = exchange_side
+                self.persist_position(pos)
+                self.emit_structured_event(
+                    'WARNING',
+                    'runtime_position_mismatch_exchange_truth',
+                    'reconciliation',
+                    'Runtime reconciliation updated local position values to exchange truth.',
+                    symbol=symbol,
+                    values={
+                        'local_quantity_before': local_qty,
+                        'exchange_quantity': exchange_qty,
+                        'qty_diff_pct': qty_diff_pct,
+                        'exchange_entry_price': exchange_entry if exchange_entry > 0.0 else None,
+                        'exchange_side': exchange_side,
+                    },
+                )
+
+        # Exchange-only positions are still handled as critical during startup gate.
+        # Runtime handling intentionally avoids auto-creating local records to prevent silent state invention.
 
     def update_positions(self):
         to_close = []
@@ -2383,7 +2485,7 @@ class Aribot:
                         self.persist_position(pos)
                         if pos.quantity <= 0:
                             to_close.append((symbol, 'partial_exit_complete'))
-                        continue
+                            continue
 
                 partial_pnl = pos.take_partial_profit(idx, level)
                 self.current_balance += partial_pnl
@@ -2491,6 +2593,7 @@ class Aribot:
             self.sync_account_balance(force=False)
             self.reset_daily_session_if_needed()
             self.update_daily_drawdown_pause()
+            self.reconcile_runtime_positions_with_exchange()
             self.update_positions()
 
             signals = 0
