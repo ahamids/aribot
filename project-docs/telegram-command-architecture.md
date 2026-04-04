@@ -4,7 +4,7 @@
 Define a safe, minimal, operator-friendly Telegram management interface for Aribot, constrained to the approved command surface only.
 
 Date: 2026-03-30
-Primary runtime: usdt_paper_bot_v2.py
+Primary runtime: aribot/runtime/engine.py
 Transport module: alert_dispatcher.py
 
 ## Scope Lock (Approved Command Surface Only)
@@ -50,7 +50,7 @@ Transport module: alert_dispatcher.py
 - Return parsed update objects and next offset hint.
 - Never raise transport exceptions across boundary; return structured failure.
 
-2. Command domain boundary (usdt_paper_bot_v2.py)
+2. Command domain boundary (aribot/runtime/engine.py)
 - Add parser, router, authorization gate, and confirmation workflow.
 - Produce pure response payload strings for Telegram chat.
 - Execute side effects only in handlers after validation and confirmation checks.
@@ -65,7 +65,7 @@ In alert_dispatcher.py:
 - get_updates(offset: int | None, timeout_seconds: int = 0, limit: int = 25) -> dict
 - extract_text_updates(payload: dict) -> list[dict]
 
-In usdt_paper_bot_v2.py:
+In aribot/runtime/engine.py:
 - poll_telegram_commands_once(cycle_index: int) -> None
 - route_telegram_command(chat_id: str, text: str, update_id: int, now_utc: datetime) -> str | None
 - parse_telegram_command(text: str) -> dict
@@ -373,7 +373,7 @@ Behavior:
 
 ## Implementation Sequence (Aligned to Tasklist)
 1. Transport read path in alert_dispatcher.py.
-2. Polling and offset persistence in usdt_paper_bot_v2.py.
+2. Polling and offset persistence in aribot/runtime/engine.py.
 3. Parser, authorization, routing foundation.
 4. Read command payload builders and formatters.
 5. Manual pause/resume gate integration.

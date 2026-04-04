@@ -25,12 +25,12 @@
 - No extra luxury features outside this scope.
 
 ## Codebase Context and File Mapping
-- Main runtime: usdt_paper_bot_v2.py
+- Main runtime: aribot/runtime/engine.py
 - Existing outbound Telegram alerts: alert_dispatcher.py
-- Runtime persistence and state: usdt_bot_v2.db via setup_database/load_state/persist_runtime_state in usdt_paper_bot_v2.py
+- Runtime persistence and state: usdt_bot_v2.db via setup_database/load_state/persist_runtime_state in aribot/runtime/engine.py
 - Existing close/kill plumbing:
   - close_position(...), close_all_positions_market(...), request_clean_shutdown(...)
-  - Kill switch monitor integration in observability.py and runtime loop checks in usdt_paper_bot_v2.py
+  - Kill switch monitor integration in observability.py and runtime loop checks in aribot/runtime/engine.py
 - Current tests harness: test_live_bot.py
 
 ## Ordered Implementation Tasks
@@ -38,11 +38,11 @@
 1. [x] Task 1: Add inbound Telegram command transport and polling loop integration
 - Description:
   - Extend telegram integration beyond outbound send_message to support inbound updates via Telegram getUpdates.
-  - Add a non-blocking command poll step to each main loop cycle in usdt_paper_bot_v2.py.
+  - Add a non-blocking command poll step to each main loop cycle in aribot/runtime/engine.py.
   - Persist last processed update offset in bot_state to prevent duplicate command execution after restart.
 - Files to edit:
   - alert_dispatcher.py
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - Bot can read inbound chat messages for configured TELEGRAM_CHAT_ID.
   - Duplicate Telegram updates are not re-processed across restart.
@@ -57,7 +57,7 @@
   - Parse /trades [n], /close SYMBOL, /close all with strict syntax handling.
   - Reject commands from non-authorized chat IDs.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
   - alert_dispatcher.py (if helper methods are needed)
 - Acceptance criteria:
   - Only specified commands are recognized.
@@ -78,7 +78,7 @@
     - cooldown state
   - Wire /status to this function and send concise Telegram text output.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - /status response includes all required fields from spec.
   - Drawdown % uses current_balance vs session_start_balance.
@@ -98,7 +98,7 @@
     - trail active
   - Return explicit "no open positions" response when empty.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - /positions lists every currently tracked open position.
   - pnl% matches position.pnl_percentage.
@@ -115,7 +115,7 @@
     - win/loss count this session
   - Use SQLite closed_trades (today filter) plus runtime/bot_state totals.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - Today realized PnL uses UTC-day filter over closed_trades close_time.
   - Cumulative PnL aligns with total_pnl/current_balance tracking.
@@ -131,7 +131,7 @@
   - If n provided: return last n closed trades.
   - Include reason field (stop, trail, time_exit, partial, etc.).
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - /trades returns expected row count for both modes (with/without n).
   - Returned entries include symbol, pnl/pnl%, reason, and close timestamp.
@@ -147,7 +147,7 @@
   - /resume re-enables entries and logs manual override timestamp.
   - Integrate manual pause with existing daily drawdown and cooldown entry gating.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - /pause prevents new entries while update_positions still runs.
   - /resume restores entry scanning eligibility.
@@ -165,7 +165,7 @@
   - Bot must send exact confirmation prompt and execute only on reply YES.
   - Non-YES replies cancel pending action.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
   - alert_dispatcher.py (if reply helpers needed)
 - Acceptance criteria:
   - Dangerous commands do not execute before YES reply.
@@ -181,7 +181,7 @@
   - /close all after YES should close all positions via existing close-all flow.
   - Send success/failure message per action result.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - /close SYMBOL closes only requested open position.
   - /close all closes all currently open positions.
@@ -198,7 +198,7 @@
     - request shutdown with exit code 42
   - Reuse existing request_clean_shutdown(exit_code=42) and runtime break behavior.
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - /kill writes configured kill switch file path.
   - Open positions are sent through close-all flow.
@@ -216,7 +216,7 @@
     - stop %
   - Explicitly exclude secrets/env raw values (API keys, bot token, chat id, secrets).
 - Files to edit:
-  - usdt_paper_bot_v2.py
+  - aribot/runtime/engine.py
 - Acceptance criteria:
   - /config includes required runtime parameters.
   - No secret-bearing values appear in output.

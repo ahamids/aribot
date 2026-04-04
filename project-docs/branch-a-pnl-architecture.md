@@ -8,7 +8,7 @@ This design covers only **Change 1** from `specs/live_bot_improvements.md`:
 - Ensure startup reconciliation and SQLite persistence use the same price-based PnL contract.
 
 Repository mapping for this branch:
-- Position manager/live bot: `usdt_paper_bot_v2.py`
+- Position manager/live bot: `aribot/runtime/engine.py`
 - Reconciler: `startup_reconciler.py`
 
 ## Problem Statement
@@ -67,7 +67,7 @@ Design guardrail:
 
 ## Where to Apply `derive_pnl_pct`
 
-## 1) Position Price Refresh Loop (`usdt_paper_bot_v2.py`)
+## 1) Position Price Refresh Loop (`aribot/runtime/engine.py`)
 
 Primary loop:
 - `Aribot.update_positions` calls `pos.update_price(analysis['current_price'])`.
@@ -86,7 +86,7 @@ Architecture change:
 Rationale:
 - Risk threshold `-2.5%` represents true adverse price move regardless of leverage.
 
-## 2) Startup Recovery of Persisted Positions (`usdt_paper_bot_v2.py`)
+## 2) Startup Recovery of Persisted Positions (`aribot/runtime/engine.py`)
 
 Current startup path:
 - `load_state()` hydrates rows from `positions`.
@@ -151,7 +151,7 @@ Accepted exchange fields:
 
 ## Integration Points Summary
 
-In `usdt_paper_bot_v2.py`:
+In `aribot/runtime/engine.py`:
 - `PaperPosition.update_price(...)`: canonical place to call `derive_pnl_pct`.
 - `Aribot.update_positions(...)`: consumes updated `pnl_percentage` for stop/trail/partial decisions.
 - `Aribot.reconcile_positions_on_startup(...)`: recomputes startup `pnl_percentage` before recovery actions.

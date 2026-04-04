@@ -28,7 +28,7 @@ Scope: Branch B only (Bybit set_trading_stop integration, non-blocking warnings,
   - Clear-all on close with fallback None payload
 - All set_trading_stop failures are logged as WARNING and returned to callers, never raised as blocking errors.
 
-### usdt_paper_bot_v2.py
+### aribot/runtime/engine.py
 - Extended positions schema in setup_database with:
   - native_sl_active INTEGER DEFAULT 0
   - native_tp_active INTEGER DEFAULT 0

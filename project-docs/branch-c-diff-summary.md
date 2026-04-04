@@ -21,7 +21,7 @@ Scope: Branch C only (explicit leverage setting before entry market orders)
 - Added `except LeverageSetError` path to mark idempotency intent failed and return failed `OrderResult` without placing an order.
 - Added one concise inline comment where entry leverage gating occurs.
 
-### usdt_paper_bot_v2.py
+### aribot/runtime/engine.py
 - Updated `submit_market_order(...)` signature to accept `leverage=None`.
 - Wired pass-through to executor:
   - `order_reason=reason`

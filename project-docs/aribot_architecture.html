@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aribot — Modular Architecture</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;color:#1a1a1a;padding:24px 28px;max-width:960px}
+@media(prefers-color-scheme:dark){body{background:#17171a;color:#e2e2e2}}
+h1{font-size:20px;font-weight:600;margin-bottom:4px}
+.sub{font-size:13px;color:#888;margin-bottom:24px}
+.sh{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#aaa;margin:28px 0 10px}
+.tree{font-family:'SFMono-Regular',Consolas,monospace;font-size:12.5px;line-height:2;background:#f7f7f8;border-radius:12px;padding:18px 20px;overflow-x:auto}
+@media(prefers-color-scheme:dark){.tree{background:#22222a}}
+.dir{color:#185FA5;font-weight:600}
+@media(prefers-color-scheme:dark){.dir{color:#85B7EB}}
+.note{color:#888}
+.del{color:#c62828;text-decoration:line-through}
+.cfg{background:#f7f7f8;border-radius:10px;padding:14px 18px;font-family:monospace;font-size:12px;line-height:1.9;overflow-x:auto;white-space:pre}
+@media(prefers-color-scheme:dark){.cfg{background:#22222a}}
+.key{color:#185FA5}
+@media(prefers-color-scheme:dark){.key{color:#85B7EB}}
+.val{color:#1D9E75}
+@media(prefers-color-scheme:dark){.val{color:#5DCAA5}}
+.cmt{color:#aaa}
+.mg3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0}
+.mg2{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:10px 0}
+.mod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin:12px 0}
+.mod{border:0.5px solid #e0e0e0;border-radius:10px;padding:14px 16px;background:#fff}
+@media(prefers-color-scheme:dark){.mod{background:#22222a;border-color:#3a3a42}}
+.mod.core{border-left:3px solid #534AB7}
+.mod.exch{border-left:3px solid #1D9E75}
+.mod.strat{border-left:3px solid #185FA5}
+.mod.risk{border-left:3px solid #D85A30}
+.mod.persist{border-left:3px solid #BA7517}
+.mod.obs{border-left:3px solid #888}
+.mod-title{font-size:13px;font-weight:600;margin-bottom:3px}
+.mod-path{font-size:11px;font-family:monospace;color:#888;margin-bottom:8px}
+.mod-desc{font-size:12px;color:#555;line-height:1.5}
+@media(prefers-color-scheme:dark){.mod-desc{color:#aaa}}
+.chips{margin-top:8px;display:flex;flex-wrap:wrap;gap:4px}
+.chip{font-size:10px;font-family:monospace;background:#f0f0f2;color:#444;padding:2px 7px;border-radius:4px}
+@media(prefers-color-scheme:dark){.chip{background:#2d2d35;color:#bbb}}
+.iface-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0}
+.iface{border-radius:10px;padding:13px 14px}
+.iface.purple{background:#EEEDFE;border:0.5px solid #AFA9EC}
+.iface.teal{background:#E1F5EE;border:0.5px solid #5DCAA5}
+.iface.blue{background:#E6F1FB;border:0.5px solid #85B7EB}
+@media(prefers-color-scheme:dark){.iface.purple{background:#26215C;border-color:#534AB7}.iface.teal{background:#04342C;border-color:#0F6E56}.iface.blue{background:#042C53;border-color:#185FA5}}
+.iface-title{font-size:12px;font-weight:700;margin-bottom:6px}
+.iface.purple .iface-title{color:#3C3489}
+.iface.teal .iface-title{color:#085041}
+.iface.blue .iface-title{color:#0C447C}
+@media(prefers-color-scheme:dark){.iface.purple .iface-title{color:#CECBF6}.iface.teal .iface-title{color:#9FE1CB}.iface.blue .iface-title{color:#B5D4F4}}
+.method{font-size:11px;font-family:monospace;color:#444;line-height:1.9}
+@media(prefers-color-scheme:dark){.method{color:#ccc}}
+.rule{border-radius:10px;padding:13px 16px;font-size:13px;line-height:1.6;margin:8px 0}
+.rule.green{background:#e8f5e9;color:#2e7d32;border:0.5px solid #a5d6a7}
+.rule.amber{background:#fff8e1;color:#e65100;border:0.5px solid #ffe082}
+@media(prefers-color-scheme:dark){.rule.green{background:#1b3a1e;border-color:#2e7d32;color:#81c784}.rule.amber{background:#3a2500;border-color:#f57f17;color:#ffcc02}}
+hr{border:none;border-top:0.5px solid #e5e5e5;margin:28px 0}
+@media(prefers-color-scheme:dark){hr{border-color:#333}}
+code{font-family:monospace;font-size:11px;background:#f0f0f2;padding:1px 5px;border-radius:3px}
+@media(prefers-color-scheme:dark){code{background:#2d2d35}}
+</style>
+</head>
+<body>
+
+<h1>Aribot — Modular Architecture Design</h1>
+<p class="sub">Plugin-registry pattern &nbsp;·&nbsp; Exchange-agnostic &nbsp;·&nbsp; Strategy-swappable &nbsp;·&nbsp; Config-driven mode switching</p>
+
+<hr>
+
+<p class="sh">Step 0 — Files to delete / rename</p>
+<div class="tree">
+<span class="del">usdc_paper_bot_v2.py</span>   <span class="note">← delete entirely</span>
+<span class="del">usdt_paper_bot_v2.py</span>   <span class="note">← rename → main.py (entry point only, &lt;30 lines)</span>
+</div>
+
+<hr>
+
+<p class="sh">New project structure</p>
+<div class="tree">
+<span class="dir">aribot/</span>
+│
+├── <span style="color:#1a1a1a">main.py</span>                          <span class="note">← entry point. bootstraps only. &lt;30 lines.</span>
+├── .env.example
+├── requirements.txt
+│
+├── <span class="dir">config/</span>                          <span class="note">← all runtime config. zero code.</span>
+│   ├── bot.yaml                     <span class="note">← mode, exchange, market, strategy, regime_filter, all risk params</span>
+│   ├── leverage_buckets.json
+│   ├── <span class="dir">exchanges/</span>
+│   │   ├── bybit_usdt.yaml
+│   │   └── bybit_usdc.yaml          <span class="note">← still supported via config switch, no code fork</span>
+│   └── <span class="dir">strategies/</span>
+│       ├── wma45_ohlc4.yaml         <span class="note">← periods, offsets, confirmation params</span>
+│       └── rsi_breakout.yaml        <span class="note">← future strategy, drop-in ready</span>
+│
+├── <span class="dir">core/</span>                            <span class="note">← wiring, loop orchestration, plugin registry</span>
+│   ├── bootstrap.py                 <span class="note">← reads config, instantiates plugins, wires dependencies</span>
+│   ├── bot_loop.py                  <span class="note">← main loop. calls interfaces only. no exchange/strategy code.</span>
+│   ├── registry.py                  <span class="note">← plugin registry: exchange/strategy/regime lookup by name</span>
+│   └── <span class="dir">interfaces/</span>                <span class="note">← abstract base classes. define the contracts.</span>
+│       ├── exchange.py              <span class="note">← ABC: load_markets, fetch_ticker, place_order, set_leverage…</span>
+│       ├── strategy.py              <span class="note">← ABC: compute_signal(candles) → Signal</span>
+│       ├── regime_filter.py         <span class="note">← ABC: is_buy_allowed(), is_sell_allowed()</span>
+│       └── risk_manager.py          <span class="note">← ABC: size_position(), check_stops()</span>
+│
+├── <span class="dir">exchanges/</span>                      <span class="note">← one folder per exchange. implements ExchangeInterface.</span>
+│   └── <span class="dir">bybit/</span>
+│       ├── __init__.py              <span class="note">← registers 'bybit' in plugin registry on import</span>
+│       ├── client.py                <span class="note">← ccxt init, auth, market loading</span>
+│       ├── order_executor.py        <span class="note">← place_order, set_leverage, set_trading_stop, cancel_native_stops</span>
+│       ├── fill_tracker.py          <span class="note">← poll fills, avg_fill_price, slippage_bps</span>
+│       └── reconciler.py            <span class="note">← startup diff: SQLite vs live exchange positions</span>
+│
+├── <span class="dir">strategies/</span>                     <span class="note">← one folder per strategy. implements StrategyInterface.</span>
+│   └── <span class="dir">wma45_ohlc4/</span>
+│       ├── __init__.py              <span class="note">← registers 'wma45_ohlc4' in plugin registry on import</span>
+│       ├── signal.py                <span class="note">← WMA-45 on OHLC4, offset 2, raw BUY/SELL output</span>
+│       └── confirmation.py          <span class="note">← consecutive block + breakout/breakdown close logic</span>
+│
+├── <span class="dir">regime/</span>                         <span class="note">← one file per regime filter. implements RegimeFilterInterface.</span>
+│   ├── wma_regime.py               <span class="note">← period is config-driven: 90 or 200, same file</span>
+│   └── base_regime.py              <span class="note">← pass-through allows_all(). use for paper/backtest without gating.</span>
+│
+├── <span class="dir">risk/</span>                           <span class="note">← shared across all exchanges and strategies</span>
+│   ├── position_manager.py         <span class="note">← per-position update loop: reprice, pnl, check all exits</span>
+│   ├── stop_manager.py             <span class="note">← hard stop, trailing stop, partial exits, time exit</span>
+│   ├── sizing.py                   <span class="note">← ATR scalar, fee-adjusted quantity, leverage tier lookup</span>
+│   └── circuit_breakers.py         <span class="note">← daily drawdown breaker, consecutive-loss cooldown</span>
+│
+├── <span class="dir">persistence/</span>                    <span class="note">← database layer. shared. no SQL outside this package.</span>
+│   ├── db.py                        <span class="note">← SQLite connection, migrations, WAL mode</span>
+│   ├── models.py                    <span class="note">← table schemas as Python dataclasses</span>
+│   └── <span class="dir">repositories/</span>
+│       ├── positions.py
+│       ├── closed_trades.py
+│       ├── bot_state.py
+│       └── orders.py
+│
+├── <span class="dir">observability/</span>                  <span class="note">← fully decoupled. wired at bootstrap via event callbacks.</span>
+│   ├── structured_logger.py
+│   ├── alert_dispatcher.py         <span class="note">← Telegram commands + hourly pulse</span>
+│   ├── kill_switch_monitor.py
+│   └── funding_tracker.py
+│
+├── <span class="dir">secrets/</span>
+│   └── secret_loader.py
+│
+├── <span class="dir">verification/</span>
+│   ├── verify_bot.py
+│   └── test_live_bot.py
+│
+└── <span class="dir">deploy/</span>
+    └── aribot.service
+</div>
+
+<hr>
+
+<p class="sh">main.py — the complete entry point (~20 lines)</p>
+<div class="cfg"><span class="cmt"># main.py — bootstrap and run. No business logic here.</span>
+<span class="key">from</span> core.bootstrap <span class="key">import</span> Bootstrap
+<span class="key">from</span> core.bot_loop  <span class="key">import</span> BotLoop
+
+<span class="key">if</span> __name__ == <span class="val">"__main__"</span>:
+    ctx = Bootstrap.from_env().build()   <span class="cmt"># reads .env + config/bot.yaml</span>
+    BotLoop(ctx).run()                   <span class="cmt"># starts loop, delegates to plugins</span></div>
+
+<hr>
+
+<p class="sh">config/bot.yaml — switch everything with one file, zero code change</p>
+<div class="cfg"><span class="cmt"># config/bot.yaml</span>
+<span class="key">mode</span>:             <span class="val">live</span>          <span class="cmt"># paper | shadow | live</span>
+<span class="key">exchange</span>:         <span class="val">bybit</span>         <span class="cmt"># loads exchanges/bybit/</span>
+<span class="key">market</span>:           <span class="val">usdt</span>          <span class="cmt"># usdt | usdc — passed to exchange config loader</span>
+<span class="key">strategy</span>:         <span class="val">wma45_ohlc4</span>   <span class="cmt"># loads strategies/wma45_ohlc4/</span>
+<span class="key">regime_filter</span>:    <span class="val">wma_regime</span>    <span class="cmt"># loads regime/wma_regime.py</span>
+<span class="key">regime_period</span>:    <span class="val">90</span>            <span class="cmt"># 90 or 200 — same file, different instance</span>
+<span class="key">candle_tf</span>:        <span class="val">4h</span>
+<span class="key">max_positions</span>:    <span class="val">10</span>
+<span class="key">base_risk_pct</span>:    <span class="val">0.011</span>
+<span class="key">stop_loss_pct</span>:    <span class="val">2.5</span>
+<span class="key">trail_buffer_pct</span>: <span class="val">1.5</span>
+<span class="key">trail_trigger_pct</span>:<span class="val">2.0</span>
+<span class="key">partial_levels</span>:   <span class="val">[2.0, 3.0, 5.0]</span>
+<span class="key">partial_sizes</span>:    <span class="val">[0.25, 0.25, 0.25]</span>
+<span class="key">time_exit_hours</span>:  <span class="val">40</span></div>
+
+<hr>
+
+<p class="sh">core/interfaces — the contracts every plugin must honour</p>
+<div class="iface-grid">
+  <div class="iface purple">
+    <p class="iface-title">ExchangeInterface (ABC)</p>
+    <p class="method">load_markets() → list[Market]</p>
+    <p class="method">fetch_ticker(symbol) → Ticker</p>
+    <p class="method">fetch_ohlcv(symbol, tf) → list[Candle]</p>
+    <p class="method">fetch_balance() → Balance</p>
+    <p class="method">fetch_positions() → list[Position]</p>
+    <p class="method">place_order(order) → OrderResult</p>
+    <p class="method">set_leverage(symbol, lev)</p>
+    <p class="method">set_trading_stop(symbol, params)</p>
+    <p class="method">cancel_native_stops(symbol)</p>
+    <p class="method">get_funding_rate(symbol) → float</p>
+  </div>
+  <div class="iface teal">
+    <p class="iface-title">StrategyInterface (ABC)</p>
+    <p class="method">compute_signal(candles, cfg) → Signal</p>
+    <p class="method">confirm_signal(candles, sig) → bool</p>
+    <p class="method">required_candle_count() → int</p>
+    <p class="method">name() → str</p>
+    <br>
+    <p class="iface-title" style="margin-top:10px">RegimeFilterInterface (ABC)</p>
+    <p class="method">update(candles)</p>
+    <p class="method">is_buy_allowed() → bool</p>
+    <p class="method">is_sell_allowed() → bool</p>
+    <p class="method">current_direction() → str</p>
+  </div>
+  <div class="iface blue">
+    <p class="iface-title">RiskManagerInterface (ABC)</p>
+    <p class="method">size_position(bal, price, atr, lev) → qty</p>
+    <p class="method">check_hard_stop(pos) → bool</p>
+    <p class="method">check_trail(pos) → bool</p>
+    <p class="method">check_partials(pos) → list[Exit]</p>
+    <p class="method">check_time_exit(pos) → bool</p>
+    <p class="method">check_drawdown(state) → bool</p>
+    <p class="method">check_loss_cooldown(state) → bool</p>
+    <br>
+    <p class="method" style="color:#888;font-size:10px">All values from config.__init__. Zero hardcoded thresholds anywhere in this module.</p>
+  </div>
+</div>
+
+<hr>
+
+<p class="sh">core/registry.py — how plugins self-register</p>
+<div class="cfg"><span class="cmt"># exchanges/bybit/__init__.py — one line registers this exchange:</span>
+<span class="key">from</span> core.registry <span class="key">import</span> Registry
+<span class="key">from</span> .client <span class="key">import</span> BybitExchange
+Registry.register_exchange(<span class="val">'bybit'</span>, BybitExchange)
+
+<span class="cmt"># strategies/wma45_ohlc4/__init__.py — one line registers this strategy:</span>
+<span class="key">from</span> core.registry <span class="key">import</span> Registry
+<span class="key">from</span> .signal <span class="key">import</span> WMA45Strategy
+Registry.register_strategy(<span class="val">'wma45_ohlc4'</span>, WMA45Strategy)
+
+<span class="cmt"># Adding Binance later:</span>
+<span class="cmt">#   1. Create exchanges/binance/__init__.py</span>
+<span class="cmt">#   2. Implement ExchangeInterface</span>
+<span class="cmt">#   3. Register as 'binance'</span>
+<span class="cmt">#   4. Set exchange: binance in bot.yaml</span>
+<span class="cmt">#   Nothing else changes.</span></div>
+
+<hr>
+
+<p class="sh">core/bot_loop.py — calls interfaces only. no exchange or strategy imports.</p>
+<div class="cfg"><span class="cmt"># BotLoop never imports ccxt, never knows about WMA, never knows about Bybit.</span>
+<span class="key">class</span> BotLoop:
+    <span class="key">def</span> run(self):
+        <span class="key">while</span> <span class="val">True</span>:
+            self._manage_open_positions()    <span class="cmt"># → risk module</span>
+            <span class="key">if</span> self._is_candle_boundary():
+                self._update_regime()        <span class="cmt"># → regime interface</span>
+                self._scan_for_entries()     <span class="cmt"># → strategy + regime + exchange interfaces</span>
+            self._check_pulse()              <span class="cmt"># → observability</span>
+            self._check_kill_switch()        <span class="cmt"># → observability</span>
+            sleep(<span class="val">60</span>)</div>
+
+<hr>
+
+<p class="sh">Module responsibilities at a glance</p>
+<div class="mod-grid">
+  <div class="mod core">
+    <p class="mod-title">core/</p>
+    <p class="mod-path">Orchestration + wiring</p>
+    <p class="mod-desc">No business logic. Reads config, imports plugins via registry, injects dependencies, runs the main loop by calling interfaces only.</p>
+    <div class="chips"><span class="chip">bootstrap.py</span><span class="chip">bot_loop.py</span><span class="chip">registry.py</span><span class="chip">interfaces/</span></div>
+  </div>
+  <div class="mod exch">
+    <p class="mod-title">exchanges/bybit/</p>
+    <p class="mod-path">Exchange implementation</p>
+    <p class="mod-desc">All ccxt code lives here and only here. Adding Binance = new folder, same interface contract. Market (USDT/USDC) is a config parameter within this plugin.</p>
+    <div class="chips"><span class="chip">client.py</span><span class="chip">order_executor.py</span><span class="chip">fill_tracker.py</span><span class="chip">reconciler.py</span></div>
+  </div>
+  <div class="mod strat">
+    <p class="mod-title">strategies/wma45_ohlc4/</p>
+    <p class="mod-path">Signal generation</p>
+    <p class="mod-desc">Implements StrategyInterface. Computes WMA-45 on OHLC4, applies confirmation. A new RSI strategy = new folder, same interface, drop in via config.</p>
+    <div class="chips"><span class="chip">signal.py</span><span class="chip">confirmation.py</span></div>
+  </div>
+  <div class="mod strat">
+    <p class="mod-title">regime/</p>
+    <p class="mod-path">Trend direction gating</p>
+    <p class="mod-desc">Period (90 or 200) comes from config. base_regime.py allows all — useful for paper mode or backtesting without regime filtering.</p>
+    <div class="chips"><span class="chip">wma_regime.py</span><span class="chip">base_regime.py</span></div>
+  </div>
+  <div class="mod risk">
+    <p class="mod-title">risk/</p>
+    <p class="mod-path">All position management</p>
+    <p class="mod-desc">Exchange-agnostic, strategy-agnostic. All thresholds come from config. Partial levels/sizes, stop%, trail% — all configurable without touching code.</p>
+    <div class="chips"><span class="chip">position_manager.py</span><span class="chip">stop_manager.py</span><span class="chip">sizing.py</span><span class="chip">circuit_breakers.py</span></div>
+  </div>
+  <div class="mod persist">
+    <p class="mod-title">persistence/</p>
+    <p class="mod-path">State and history</p>
+    <p class="mod-desc">Repository pattern. No SQL outside this package. Migrations are versioned. DB path comes from config. Existing schema preserved with forward migrations.</p>
+    <div class="chips"><span class="chip">db.py</span><span class="chip">models.py</span><span class="chip">repositories/</span></div>
+  </div>
+  <div class="mod obs">
+    <p class="mod-title">observability/</p>
+    <p class="mod-path">Logging + alerts + monitoring</p>
+    <p class="mod-desc">Completely decoupled. Receives events via callbacks registered at bootstrap. Exchange and strategy code never imports from this package.</p>
+    <div class="chips"><span class="chip">structured_logger.py</span><span class="chip">alert_dispatcher.py</span><span class="chip">kill_switch_monitor.py</span><span class="chip">funding_tracker.py</span></div>
+  </div>
+  <div class="mod">
+    <p class="mod-title">config/</p>
+    <p class="mod-path">Zero code — data only</p>
+    <p class="mod-desc">YAML and JSON files only. bot.yaml controls everything: mode, exchange, market, strategy, regime filter, all risk parameters. Operator changes config, not code.</p>
+    <div class="chips"><span class="chip">bot.yaml</span><span class="chip">exchanges/*.yaml</span><span class="chip">strategies/*.yaml</span><span class="chip">leverage_buckets.json</span></div>
+  </div>
+</div>
+
+<hr>
+
+<p class="sh">What "plug and play" looks like in practice</p>
+
+<div class="rule green"><strong>Adding Binance Futures</strong><br>
+Create <code>exchanges/binance/__init__.py</code>, implement <code>ExchangeInterface</code>, register as <code>'binance'</code>. Set <code>exchange: binance</code> in bot.yaml. Strategy, risk, persistence, observability are untouched and work identically.</div>
+
+<div class="rule green"><strong>Adding an RSI-based strategy</strong><br>
+Create <code>strategies/rsi_breakout/</code>, implement <code>StrategyInterface</code>, register as <code>'rsi_breakout'</code>. Set <code>strategy: rsi_breakout</code> in bot.yaml. Both strategies can run as separate bot instances simultaneously with different config files.</div>
+
+<div class="rule green"><strong>Switching WMA-200 → WMA-90 regime filter</strong><br>
+In bot.yaml: <code>regime_period: 90</code>. One value. No code change. <code>wma_regime.py</code> reads the period from config at init.</div>
+
+<div class="rule green"><strong>Switching USDT ↔ USDC</strong><br>
+In bot.yaml: <code>market: usdc</code>. The Bybit plugin reads market from config to select the correct symbol suffix and quote currency. No second script, no forked code, no deleted file.</div>
+
+<div class="rule green"><strong>Changing partial exit sizes</strong><br>
+In bot.yaml: <code>partial_sizes: [0.30, 0.30, 0.40]</code>. One line. Risk module reads from config at runtime.</div>
+
+<div class="rule amber"><strong>Migration note — existing DB and tests</strong><br>
+The existing SQLite schema is preserved. <code>persistence/db.py</code> runs forward migrations on startup. Existing <code>verify_bot.py</code> and <code>test_live_bot.py</code> move to <code>verification/</code> with updated import paths. No test logic changes required.</div>
+
+</body>
+</html>

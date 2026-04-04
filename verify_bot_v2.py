@@ -24,13 +24,10 @@ def configure_market_context(market):
 
     market_lc = market.lower()
     if market_lc == "usdt":
-        module_name = "usdt_paper_bot_v2"
+        module_name = "aribot.runtime.engine"
         QUOTE_CCY = "USDT"
-    elif market_lc == "usdc":
-        module_name = "usdc_paper_bot_v2"
-        QUOTE_CCY = "USDC"
     else:
-        raise ValueError(f"Unsupported market: {market}")
+        raise ValueError(f"Unsupported market: {market}. Only 'usdt' is supported.")
 
     module = importlib.import_module(module_name)
     PaperPosition = getattr(module, "PaperPosition")
@@ -308,7 +305,7 @@ def main():
     parser = argparse.ArgumentParser(description="Verify Aribot core logic and log markers")
     parser.add_argument(
         "--market",
-        choices=["usdt", "usdc"],
+        choices=["usdt"],
         default="usdt",
         help="Target market bot module to verify",
     )

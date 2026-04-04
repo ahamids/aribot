@@ -1,10 +1,10 @@
 # Live Bot Improvements Atomic Task List
 
 ## Spec-to-Repo File Mapping
-- position_manager.py -> usdt_paper_bot_v2.py
+- position_manager.py -> aribot/runtime/engine.py
 - reconciler.py -> startup_reconciler.py
 - live_bot.py -> order_executor.py
-- db_schema.py -> usdt_paper_bot_v2.py (setup_database) and migrate_live_schema.py (migration path)
+- db_schema.py -> aribot/runtime/engine.py (setup_database) and migrate_live_schema.py (migration path)
 - migrate_v2_to_live.sql -> migrate_live_schema.py
 
 ## Ordered Implementation Tasks (C -> A -> B)
@@ -25,7 +25,7 @@
 
 3. Task C3: Thread leverage value from strategy to executor order calls
 - Change: C (leverage setter)
-- Target files: usdt_paper_bot_v2.py
+- Target files: aribot/runtime/engine.py
 - Dependencies: [2]
 - Work: Update submit_market_order signature to accept leverage and pass it to execute_order; provide leverage from get_leverage_for_symbol for entry, partial exits, and full exits so every live market order has an explicit leverage value.
 - Acceptance criterion: All live market order callsites in the bot pass a leverage argument into submit_market_order.
@@ -39,21 +39,21 @@
 
 5. Task A1: Introduce a single price-based pnl percentage helper
 - Change: A (price-based pnl derivation)
-- Target files: usdt_paper_bot_v2.py
+- Target files: aribot/runtime/engine.py
 - Dependencies: [4]
 - Work: Add a helper derive_pnl_pct(entry_price, current_price, side) using the spec formulas for long and short and use it as the canonical pnl percentage source.
 - Acceptance criterion: The helper returns -2.5 for long(entry=100,current=97.5) and -2.5 for short(entry=100,current=102.5).
 
 6. Task A2: Refactor position price refresh to use price-derived pnl percentage
 - Change: A (price-based pnl derivation)
-- Target files: usdt_paper_bot_v2.py
+- Target files: aribot/runtime/engine.py
 - Dependencies: [5]
 - Work: Update PaperPosition.update_price so pnl_percentage is derived from price movement and side, while pnl amount can remain fee-adjusted.
 - Acceptance criterion: Position stop-loss checks in update_positions are driven by the price-derived pnl_percentage and no margin-relative exchange field.
 
 7. Task A3: Ensure startup recovery path uses the same derived pnl percentage
 - Change: A (price-based pnl derivation)
-- Target files: usdt_paper_bot_v2.py
+- Target files: aribot/runtime/engine.py
 - Dependencies: [6]
 - Work: Verify reconcile_positions_on_startup refreshes position state through the updated price-derivation path and does not source pnl percentage from exchange position percentage fields.
 - Acceptance criterion: On restart, recovered positions compute pnl_percentage from current_price and entry_price only.
@@ -74,7 +74,7 @@
 
 10. Task B1: Add native stop state columns to schema and migration
 - Change: B (native stop/TP/trail layer)
-- Target files: usdt_paper_bot_v2.py, migrate_live_schema.py
+- Target files: aribot/runtime/engine.py, migrate_live_schema.py
 - Dependencies: [9]
 - Work: Add native_sl_active, native_tp_active, native_trail_active, native_sl_price to positions table in setup_database migration path and migrate_live_schema.py idempotent column migration.
 - Acceptance criterion: Running migration on an existing db produces all four native-stop columns without data loss.
@@ -88,7 +88,7 @@
 
 12. Task B3: Wire native stop lifecycle into bot position lifecycle
 - Change: B (native stop/TP/trail layer)
-- Target files: usdt_paper_bot_v2.py
+- Target files: aribot/runtime/engine.py
 - Dependencies: [11]
 - Work: On live open set native SL and safety TP using entry fill price; when trailing activates set native trailing and clear fixed SL/TP; on any close clear all native stops and persist native state flags/prices.
 - Acceptance criterion: Opening a live position attempts native SL/TP setup and closing it attempts native stop cleanup every time.

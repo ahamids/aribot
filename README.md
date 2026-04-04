@@ -1,6 +1,7 @@
 ﻿# Aribot
 
-Aribot runs from `usdt_paper_bot_v2.py` and trades Bybit perpetuals using a 4h strategy.
+Aribot now boots through `main.py` (thin entrypoint) and delegates runtime work to modular bootstrap code under `aribot/`.
+The packaged runtime engine now lives under `aribot/runtime/engine.py`.
 
 Emoji output mode:
 - Default is `noemojis` (no emoji characters in console/text log output).
@@ -8,10 +9,11 @@ Emoji output mode:
 - JSON structured logging in `observability.jsonl` is unchanged by this flag.
 
 Examples:
-- `python usdt_paper_bot_v2.py`
-- `python usdt_paper_bot_v2.py --emojis`
-- `python usdc_paper_bot_v2.py`
-- `python usdc_paper_bot_v2.py --emojis`
+- `python main.py`
+- `python main.py --profile usdt`
+- `python main.py --profile usdc`
+- `python main.py --mode shadow`
+- `python main.py --emojis`
 
 This README is operator-focused and reflects implemented behavior in code.
 
@@ -23,7 +25,7 @@ Requirements:
 
 1. Python 3.10+.
 2. `pip` (usually included with Python).
-3. Project dependencies: `ccxt`, `requests`, `python-dotenv`.
+3. Project dependencies: `ccxt`, `requests`, `python-dotenv`, `pyyaml`.
 
 Windows (PowerShell):
 
@@ -34,7 +36,7 @@ python --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install ccxt requests python-dotenv
+python -m pip install ccxt requests python-dotenv pyyaml
 Copy-Item .env.example .env
 ```
 
@@ -50,7 +52,7 @@ python3 --version
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install ccxt requests python-dotenv
+python -m pip install ccxt requests python-dotenv pyyaml
 cp .env.example .env
 ```
 
@@ -65,7 +67,7 @@ cp .env.example .env
 ### 3) Run
 
 ```bash
-python usdt_paper_bot_v2.py
+python main.py
 ```
 
 ## Required Environment
@@ -89,7 +91,7 @@ TELEGRAM_VERIFY_ON_START=true
 DRY_RUN=false
 ORDER_STATUS_TIMEOUT_SECONDS=30
 ORDER_STATUS_POLL_INTERVAL_SECONDS=1.5
-ORDER_EXECUTOR_DB=usdt_paper_bot_v2.db
+ORDER_EXECUTOR_DB=usdt_bot_v2.db
 ```
 
 Mode semantics:
@@ -107,6 +109,36 @@ Mode semantics:
 4. In `shadow`/`live`, run startup reconciliation gate before entering loop.
 5. Optionally run Telegram delivery readiness check.
 6. Enter main loop (`60` second cadence).
+
+## Phase 1 Parity Baseline
+
+Run deterministic characterization tests before refactors:
+
+```bash
+python -m unittest tests.parity.test_usdt_characterization -v
+```
+
+Existing verification harness remains available:
+
+```bash
+python verify_bot_v2.py --market usdt
+```
+
+Plugin IDs are now config-driven in `config/bot.yaml` and profile files:
+
+```yaml
+plugins:
+   exchange: bybit
+   strategy: wma45_ohlc4
+   regime_filter: wma_regime
+   risk: default_risk
+```
+
+At startup, `main.py` bootstrap resolves these IDs, validates availability,
+and instantiates runtime plugin shims bound to the current bot context.
+These shims are exposed through a runtime execution context used by the loop
+for symbol selection, regime updates, risk gates, strategy analysis, and
+exchange data fetch operations.
 
 ## Strategy (Implemented)
 
@@ -279,7 +311,7 @@ Runtime tables:
 6. `reconciliation_reports`
 7. `reconciliation_items`
 
-Executor idempotency DB path comes from `ORDER_EXECUTOR_DB` (default `usdt_paper_bot_v2.db`) and stores `order_idempotency`.
+Executor idempotency DB path comes from `ORDER_EXECUTOR_DB` (default `usdt_bot_v2.db`) and stores `order_idempotency`.
 
 Recovery behavior:
 

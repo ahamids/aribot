@@ -5,7 +5,7 @@ Scope: Branch A only (price-based pnl_percentage derivation and startup reconcil
 
 ## Files Changed
 
-### usdt_paper_bot_v2.py
+### aribot/runtime/engine.py
 - Added `derive_pnl_pct(entry_price, current_price, side)` as the canonical price-based PnL percentage helper.
 - Updated `PaperPosition.update_price(...)` so `pnl_percentage` is always derived by `derive_pnl_pct(...)`.
 - Preserved existing net cash PnL (`pnl`) and fee accounting logic; only percentage semantics were standardized.
