@@ -140,6 +140,161 @@ These shims are exposed through a runtime execution context used by the loop
 for symbol selection, regime updates, risk gates, strategy analysis, and
 exchange data fetch operations.
 
+## Extending the Bot (Exchanges, Strategies, Indicators)
+
+This section is implementation-focused and follows the current code path in:
+- `aribot/plugins/registry.py`
+- `aribot/plugins/factory.py`
+- `aribot/adapters/`
+- `aribot/domain/indicators.py`
+
+### Add a new exchange plugin
+
+Goal: make `plugins.exchange: <your_exchange_id>` valid in config.
+
+1. Create a new adapter file under `aribot/adapters/`.
+   - Example: `aribot/adapters/exchange_binance.py`
+2. Implement methods used by runtime context:
+   - `name(self) -> str`
+   - `list_symbols(self) -> list[str]`
+   - `fetch_ticker(self, symbol)`
+   - `fetch_ohlcv(self, symbol, timeframe, limit=100)`
+   - `fetch_balance(self)`
+3. Register the plugin id in `aribot/plugins/registry.py` inside `build_builtin_registry()`.
+4. Wire construction in `aribot/plugins/factory.py`:
+   - add import for your adapter
+   - extend `_build_exchange(...)` with your id
+5. Update config to select it:
+   - `config/bot.yaml` or `config/profiles/<profile>.yaml`
+   - set `plugins.exchange: <your_exchange_id>`
+6. Validate:
+
+```bash
+python -m unittest discover -s tests/parity
+python verify_bot_v2.py --market usdt
+```
+
+Minimal skeleton:
+
+```python
+from __future__ import annotations
+
+
+class BinanceExchangeAdapter:
+   def __init__(self, bot):
+      self.bot = bot
+
+   def name(self) -> str:
+      return "binance"
+
+   def list_symbols(self) -> list[str]:
+      return list(getattr(self.bot, "quote_swaps", []))
+
+   def fetch_ticker(self, symbol: str):
+      return self.bot.exchange.fetch_ticker(symbol)
+
+   def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
+      return self.bot.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+   def fetch_balance(self):
+      return self.bot.exchange.fetch_balance()
+```
+
+### Add a new strategy plugin
+
+Goal: make `plugins.strategy: <your_strategy_id>` valid and produce analysis payloads compatible with open/update flow.
+
+Required return shape from `analyze_symbol(...)`:
+- `symbol` (str)
+- `current_price` (float)
+- `signal` (`BUY` or `SELL`)
+- `confirmed` (bool)
+- optional: `atr_ratio` (float)
+
+1. Create strategy adapter file under `aribot/adapters/`.
+   - Example: `aribot/adapters/strategy_ema_cross.py`
+2. Implement:
+   - `name(self) -> str`
+   - `required_candle_count(self) -> int`
+   - `analyze_symbol(self, symbol: str, for_entry: bool = False)`
+3. Register id in `aribot/plugins/registry.py`.
+4. Wire `_build_strategy(...)` in `aribot/plugins/factory.py`.
+5. Select in config:
+   - `plugins.strategy: <your_strategy_id>`
+6. Validate with parity tests.
+
+Minimal skeleton:
+
+```python
+from __future__ import annotations
+
+from aribot.domain.indicators import calculate_ohlc4
+
+
+class EMACrossStrategyAdapter:
+   def __init__(self, bot):
+      self.bot = bot
+
+   def name(self) -> str:
+      return "ema_cross"
+
+   def required_candle_count(self) -> int:
+      return 120
+
+   def analyze_symbol(self, symbol: str, for_entry: bool = False):
+      ohlcv = self.bot.fetch_symbol_ohlcv(symbol, "4h", limit=120)
+      if not ohlcv or len(ohlcv) < self.required_candle_count():
+         return None
+
+      ohlc4 = calculate_ohlc4(ohlcv)
+      current_price = float(ohlc4[-1])
+
+      # Replace with your own fast/slow EMA logic.
+      signal = "BUY"
+      confirmed = True
+
+      return {
+         "symbol": symbol,
+         "current_price": current_price,
+         "signal": signal,
+         "confirmed": confirmed,
+         "atr_ratio": 0.0,
+      }
+```
+
+### Add a new indicator (currently WMA + OHLC4)
+
+Indicators live in `aribot/domain/indicators.py` and should be pure functions.
+
+1. Add your function to `aribot/domain/indicators.py`.
+   - Keep it stateless and deterministic.
+2. Import and use it from your strategy adapter.
+3. Add or update parity/unit tests for the new indicator behavior.
+
+Example indicator:
+
+```python
+def calculate_ema(source_prices, period: int):
+   if len(source_prices) < period:
+      return None
+   k = 2 / (period + 1)
+   ema = float(source_prices[0])
+   for price in source_prices[1:]:
+      ema = float(price) * k + ema * (1 - k)
+   return ema
+```
+
+### Common failure modes checklist
+
+1. `Unknown <kind> plugin` at startup
+   - Plugin id not registered in `build_builtin_registry()` or not wired in factory.
+2. Entry scan runs but no positions open
+   - Strategy adapter returns missing fields or `confirmed=False`.
+3. Runtime fallback unexpectedly used
+   - Adapter method raises exception; execution context falls back by design.
+4. Tests pass locally but startup fails
+   - Config profile points to plugin id not available in registry/factory.
+
 ## Strategy (Implemented)
 
 ### Signal model
@@ -351,3 +506,23 @@ sudo systemctl status aribot
 1. Text log: `usdt_trading_log.txt`
 2. Structured events: `observability.jsonl`
 3. Runtime DB: `usdt_bot_v2.db`
+
+## New Plugin PR Checklist
+
+Use this checklist before opening a PR that adds or changes exchange/strategy/risk/regime plugins.
+
+1. Create adapter file(s) under `aribot/adapters/` with required methods implemented.
+2. Register plugin id(s) in `aribot/plugins/registry.py` via `build_builtin_registry()`.
+3. Wire plugin construction in `aribot/plugins/factory.py`.
+4. Update config selection in `config/bot.yaml` or `config/profiles/<profile>.yaml`.
+5. Confirm runtime return shapes are compatible (`analyze_symbol` payload fields in particular).
+6. Add or update parity/unit tests covering both plugin path and fallback path.
+7. Run validation locally:
+
+```bash
+python -m unittest discover -s tests/parity
+python verify_bot_v2.py --market usdt
+```
+
+8. Update README/docs for any new plugin IDs, config keys, or operational behavior.
+9. Include a PR summary with: changed files, new plugin IDs, config diff, and test output.
