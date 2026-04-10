@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Symbol Analysis Report</title>
+<style>
+:root {
+  --bg: #f7f8fa;
+  --fg: #111827;
+  --muted: #4b5563;
+  --card: #ffffff;
+  --border: #d1d5db;
+  --accent1: #0ea5e9;
+  --accent2: #16a34a;
+  --accent3: #f59e0b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1020;
+    --fg: #e5e7eb;
+    --muted: #9ca3af;
+    --card: #111827;
+    --border: #374151;
+    --accent1: #38bdf8;
+    --accent2: #22c55e;
+    --accent3: #fbbf24;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 20px; background: var(--bg); color: var(--fg); font: 14px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+h1, h2 { margin: 0 0 12px 0; }
+.small { color: var(--muted); }
+.section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin: 14px 0; overflow-x: auto; }
+.summary-grid { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(160px, 1fr)); }
+.summary-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.cards { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(220px, 1fr)); }
+.card { border: 2px solid var(--border); border-radius: 8px; padding: 10px; }
+.card.top3 { border-color: var(--accent1); }
+.card.top5 { border-color: var(--accent2); }
+.card.top10 { border-color: var(--accent3); }
+.card ul { margin: 8px 0 0 0; padding: 0; list-style: none; }
+.card li { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid var(--border); padding: 6px 8px; white-space: nowrap; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+th:nth-child(2), td:nth-child(2) { text-align: left; }
+.season-dots { text-align: left; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 5px; border: 1px solid rgba(0,0,0,.2); }
+.dot-pos { background: #22c55e; }
+.dot-neg { background: #ef4444; }
+.dot-absent { background: #9ca3af; }
+.pnl-pos { color: #15803d; font-weight: 600; }
+.pnl-neg { color: #b91c1c; font-weight: 600; }
+.pnl-zero { color: var(--muted); }
+.pnl-na { color: var(--muted); }
+.side-sep td { border-top: 2px solid var(--border); }
+.legend { display: flex; align-items: center; gap: 10px; }
+.legend-bar { width: 220px; height: 12px; border-radius: 8px; border: 1px solid var(--border); background: linear-gradient(90deg, rgb(220,120,120), rgb(255,255,255), rgb(120,220,120)); }
+</style>
+</head>
+<body>
+  <h1>Symbol Performance Analysis</h1>
+  <div class="small">Root: C:\code\aribot\backtest_artifacts\s10v1</div>
+
+  <section class="section">
+    <h2>1. Run summary bar</h2>
+    <div class="summary-grid">
+      <div class="summary-item"><b>Season count</b><div>6</div></div>
+      <div class="summary-item"><b>Date range</b><div>2021-01-16 -&gt; 2026-04-08</div></div>
+      <div class="summary-item"><b>Symbol count</b><div>10</div></div>
+      <div class="summary-item"><b>Total trades</b><div>6239</div></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>2. Focus list cards</h2>
+    <div class="cards">
+      <div class="card top3"><b>Top 3</b><ul><li><span>ADAUSDT</span><b>0.965</b></li><li><span>HBARUSDT</span><b>0.905</b></li><li><span>DOTUSDT</span><b>0.740</b></li></ul></div>
+      <div class="card top5"><b>Top 5</b><ul><li><span>ADAUSDT</span><b>0.965</b></li><li><span>HBARUSDT</span><b>0.905</b></li><li><span>DOTUSDT</span><b>0.740</b></li><li><span>OPUSDT</span><b>0.670</b></li><li><span>LINKUSDT</span><b>0.530</b></li></ul></div>
+      <div class="card top10"><b>Top 10</b><ul><li><span>ADAUSDT</span><b>0.965</b></li><li><span>HBARUSDT</span><b>0.905</b></li><li><span>DOTUSDT</span><b>0.740</b></li><li><span>OPUSDT</span><b>0.670</b></li><li><span>LINKUSDT</span><b>0.530</b></li><li><span>AVAXUSDT</span><b>0.490</b></li><li><span>XLMUSDT</span><b>0.485</b></li><li><span>1000BONKUSDT</span><b>0.310</b></li><li><span>DOGEUSDT</span><b>0.230</b></li><li><span>BTCUSDT</span><b>0.175</b></li></ul></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>3. Full ranked table</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th><th>Symbol</th><th>Total PnL</th><th>Win Rate</th><th>Profit Factor</th><th>Trail/Stop</th><th>Seasons</th>
+          <th>2021_season</th><th>2022_season</th><th>2023_season</th><th>2024_season</th><th>2025_season</th><th>2026_season</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td><b>ADAUSDT</b></td><td>+631.0</td><td>55.4%</td><td>1.145</td><td>1.291</td><td class="season-dots"><span class="dot dot-pos" title="2021_season: profitable"></span><span class="dot dot-pos" title="2022_season: profitable"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-neg" title="2024_season: loss"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-pos">+58.2</td><td class="pnl-pos">+77.9</td><td class="pnl-pos">+100.4</td><td class="pnl-neg">-36.0</td><td class="pnl-pos">+427.5</td><td class="pnl-pos">+3.0</td></tr><tr><td>2</td><td><b>HBARUSDT</b></td><td>+557.2</td><td>55.4%</td><td>1.203</td><td>1.230</td><td class="season-dots"><span class="dot dot-neg" title="2021_season: loss"></span><span class="dot dot-pos" title="2022_season: profitable"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-pos" title="2024_season: profitable"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-neg">-44.8</td><td class="pnl-pos">+30.7</td><td class="pnl-pos">+144.3</td><td class="pnl-pos">+78.4</td><td class="pnl-pos">+345.3</td><td class="pnl-pos">+3.4</td></tr><tr><td>3</td><td><b>DOTUSDT</b></td><td>+472.6</td><td>54.1%</td><td>1.105</td><td>1.231</td><td class="season-dots"><span class="dot dot-neg" title="2021_season: loss"></span><span class="dot dot-neg" title="2022_season: loss"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-pos" title="2024_season: profitable"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-neg">-13.7</td><td class="pnl-neg">-129.0</td><td class="pnl-pos">+122.0</td><td class="pnl-pos">+248.7</td><td class="pnl-pos">+225.8</td><td class="pnl-pos">+18.9</td></tr><tr><td>4</td><td><b>OPUSDT</b></td><td>+304.3</td><td>52.1%</td><td>1.104</td><td>1.080</td><td class="season-dots"><span class="dot dot-absent" title="2021_season: absent"></span><span class="dot dot-neg" title="2022_season: loss"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-pos" title="2024_season: profitable"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-na">n/a</td><td class="pnl-neg">-4.3</td><td class="pnl-pos">+46.0</td><td class="pnl-pos">+104.8</td><td class="pnl-pos">+95.1</td><td class="pnl-pos">+62.7</td></tr><tr><td>5</td><td><b>LINKUSDT</b></td><td>+276.0</td><td>53.7%</td><td>1.055</td><td>1.168</td><td class="season-dots"><span class="dot dot-neg" title="2021_season: loss"></span><span class="dot dot-pos" title="2022_season: profitable"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-neg" title="2024_season: loss"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-neg">-243.3</td><td class="pnl-pos">+96.7</td><td class="pnl-pos">+206.3</td><td class="pnl-neg">-7.9</td><td class="pnl-pos">+190.6</td><td class="pnl-pos">+33.6</td></tr><tr><td>6</td><td><b>AVAXUSDT</b></td><td>+191.4</td><td>54.8%</td><td>1.048</td><td>1.212</td><td class="season-dots"><span class="dot dot-pos" title="2021_season: profitable"></span><span class="dot dot-pos" title="2022_season: profitable"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-neg" title="2024_season: loss"></span><span class="dot dot-neg" title="2025_season: loss"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-pos">+65.8</td><td class="pnl-pos">+86.3</td><td class="pnl-pos">+79.7</td><td class="pnl-neg">-89.0</td><td class="pnl-neg">-77.5</td><td class="pnl-pos">+126.1</td></tr><tr><td>7</td><td><b>XLMUSDT</b></td><td>+161.1</td><td>55.8%</td><td>1.062</td><td>1.239</td><td class="season-dots"><span class="dot dot-neg" title="2021_season: loss"></span><span class="dot dot-neg" title="2022_season: loss"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-neg" title="2024_season: loss"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-neg">-43.8</td><td class="pnl-neg">-18.0</td><td class="pnl-pos">+114.1</td><td class="pnl-neg">-107.4</td><td class="pnl-pos">+214.6</td><td class="pnl-pos">+1.6</td></tr><tr><td>8</td><td><b>1000BONKUSDT</b></td><td>+141.9</td><td>48.6%</td><td>1.057</td><td>0.939</td><td class="season-dots"><span class="dot dot-absent" title="2021_season: absent"></span><span class="dot dot-absent" title="2022_season: absent"></span><span class="dot dot-neg" title="2023_season: loss"></span><span class="dot dot-neg" title="2024_season: loss"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-na">n/a</td><td class="pnl-na">n/a</td><td class="pnl-neg">-103.4</td><td class="pnl-neg">-49.3</td><td class="pnl-pos">+289.7</td><td class="pnl-pos">+4.9</td></tr><tr><td>9</td><td><b>DOGEUSDT</b></td><td>-43.8</td><td>50.5%</td><td>0.990</td><td>1.042</td><td class="season-dots"><span class="dot dot-pos" title="2021_season: profitable"></span><span class="dot dot-neg" title="2022_season: loss"></span><span class="dot dot-neg" title="2023_season: loss"></span><span class="dot dot-pos" title="2024_season: profitable"></span><span class="dot dot-pos" title="2025_season: profitable"></span><span class="dot dot-neg" title="2026_season: loss"></span></td><td class="pnl-pos">+23.4</td><td class="pnl-neg">-45.9</td><td class="pnl-neg">-240.6</td><td class="pnl-pos">+169.8</td><td class="pnl-pos">+91.8</td><td class="pnl-neg">-42.4</td></tr><tr><td>10</td><td><b>BTCUSDT</b></td><td>-122.3</td><td>53.2%</td><td>0.976</td><td>1.213</td><td class="season-dots"><span class="dot dot-neg" title="2021_season: loss"></span><span class="dot dot-neg" title="2022_season: loss"></span><span class="dot dot-pos" title="2023_season: profitable"></span><span class="dot dot-neg" title="2024_season: loss"></span><span class="dot dot-neg" title="2025_season: loss"></span><span class="dot dot-pos" title="2026_season: profitable"></span></td><td class="pnl-neg">-116.6</td><td class="pnl-neg">-67.1</td><td class="pnl-pos">+103.8</td><td class="pnl-neg">-41.5</td><td class="pnl-neg">-24.1</td><td class="pnl-pos">+23.2</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <h2>4. Side breakdown table</h2>
+    <table>
+      <thead>
+        <tr><th>Symbol</th><th>Side</th><th>Trades</th><th>Win Rate</th><th>Profit Factor</th><th>Trail/Stop Ratio</th><th>Total PnL</th></tr>
+      </thead>
+      <tbody>
+        <tr class="side-sep"><td>ADAUSDT</td><td>long</td><td>294</td><td>54.4%</td><td>1.048</td><td>1.225</td><td>+100.8</td></tr><tr class="side-sep"><td>ADAUSDT</td><td>short</td><td>381</td><td>56.2%</td><td>1.235</td><td>1.346</td><td>+530.2</td></tr><tr class="side-sep"><td>HBARUSDT</td><td>long</td><td>233</td><td>55.4%</td><td>1.312</td><td>1.235</td><td>+343.2</td></tr><tr class="side-sep"><td>HBARUSDT</td><td>short</td><td>345</td><td>55.4%</td><td>1.130</td><td>1.227</td><td>+214.0</td></tr><tr class="side-sep"><td>DOTUSDT</td><td>long</td><td>283</td><td>50.9%</td><td>0.878</td><td>1.030</td><td>-259.1</td></tr><tr class="side-sep"><td>DOTUSDT</td><td>short</td><td>434</td><td>56.2%</td><td>1.308</td><td>1.390</td><td>+731.8</td></tr><tr class="side-sep"><td>OPUSDT</td><td>long</td><td>230</td><td>48.3%</td><td>0.925</td><td>0.932</td><td>-103.2</td></tr><tr class="side-sep"><td>OPUSDT</td><td>short</td><td>325</td><td>54.8%</td><td>1.262</td><td>1.199</td><td>+407.5</td></tr><tr class="side-sep"><td>LINKUSDT</td><td>long</td><td>362</td><td>53.0%</td><td>0.885</td><td>1.112</td><td>-295.0</td></tr><tr class="side-sep"><td>LINKUSDT</td><td>short</td><td>429</td><td>54.3%</td><td>1.231</td><td>1.218</td><td>+571.0</td></tr><tr class="side-sep"><td>AVAXUSDT</td><td>long</td><td>247</td><td>52.2%</td><td>1.012</td><td>1.103</td><td>+20.8</td></tr><tr class="side-sep"><td>AVAXUSDT</td><td>short</td><td>348</td><td>56.6%</td><td>1.079</td><td>1.297</td><td>+170.7</td></tr><tr class="side-sep"><td>XLMUSDT</td><td>long</td><td>224</td><td>51.3%</td><td>0.886</td><td>1.081</td><td>-129.6</td></tr><tr class="side-sep"><td>XLMUSDT</td><td>short</td><td>312</td><td>59.0%</td><td>1.198</td><td>1.370</td><td>+290.7</td></tr><tr class="side-sep"><td>1000BONKUSDT</td><td>long</td><td>190</td><td>43.2%</td><td>1.055</td><td>0.743</td><td>+57.4</td></tr><tr class="side-sep"><td>1000BONKUSDT</td><td>short</td><td>283</td><td>52.3%</td><td>1.058</td><td>1.096</td><td>+84.5</td></tr><tr class="side-sep"><td>DOGEUSDT</td><td>long</td><td>259</td><td>49.8%</td><td>0.938</td><td>0.984</td><td>-115.3</td></tr><tr class="side-sep"><td>DOGEUSDT</td><td>short</td><td>353</td><td>51.0%</td><td>1.030</td><td>1.088</td><td>+71.5</td></tr><tr class="side-sep"><td>BTCUSDT</td><td>long</td><td>354</td><td>55.1%</td><td>1.079</td><td>1.322</td><td>+190.1</td></tr><tr class="side-sep"><td>BTCUSDT</td><td>short</td><td>353</td><td>51.3%</td><td>0.887</td><td>1.120</td><td>-312.4</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <h2>5. Season-by-season heatmap</h2>
+    <div class="legend"><span class="small">deep red</span><div class="legend-bar"></div><span class="small">deep green</span></div>
+    <table>
+      <thead><tr><th>Symbol</th><th>2021_season</th><th>2022_season</th><th>2023_season</th><th>2024_season</th><th>2025_season</th><th>2026_season</th></tr></thead>
+      <tbody><tr><td><b>1000BONKUSDT</b></td><td style="background:#b3b3b3">n/a</td><td style="background:#b3b3b3">n/a</td><td style="background:rgb(246,225,225)">-103.4</td><td style="background:rgb(250,241,241)">-49.3</td><td style="background:rgb(173,231,173)">+289.7</td><td style="background:rgb(253,254,253)">+4.9</td></tr><tr><td><b>ADAUSDT</b></td><td style="background:rgb(238,250,238)">+58.2</td><td style="background:rgb(233,248,233)">+77.9</td><td style="background:rgb(226,246,226)">+100.4</td><td style="background:rgb(252,244,244)">-36.0</td><td style="background:rgb(135,220,135)">+427.5</td><td style="background:rgb(254,254,254)">+3.0</td></tr><tr><td><b>AVAXUSDT</b></td><td style="background:rgb(236,249,236)">+65.8</td><td style="background:rgb(230,247,230)">+86.3</td><td style="background:rgb(232,248,232)">+79.7</td><td style="background:rgb(247,230,230)">-89.0</td><td style="background:rgb(248,233,233)">-77.5</td><td style="background:rgb(219,244,219)">+126.1</td></tr><tr><td><b>BTCUSDT</b></td><td style="background:rgb(245,222,222)">-116.6</td><td style="background:rgb(249,236,236)">-67.1</td><td style="background:rgb(225,246,225)">+103.8</td><td style="background:rgb(251,243,243)">-41.5</td><td style="background:rgb(253,248,248)">-24.1</td><td style="background:rgb(248,253,248)">+23.2</td></tr><tr><td><b>DOGEUSDT</b></td><td style="background:rgb(248,253,248)">+23.4</td><td style="background:rgb(251,242,242)">-45.9</td><td style="background:rgb(235,187,187)">-240.6</td><td style="background:rgb(207,241,207)">+169.8</td><td style="background:rgb(229,247,229)">+91.8</td><td style="background:rgb(251,243,243)">-42.4</td></tr><tr><td><b>DOTUSDT</b></td><td style="background:rgb(253,251,251)">-13.7</td><td style="background:rgb(244,218,218)">-129.0</td><td style="background:rgb(220,245,220)">+122.0</td><td style="background:rgb(185,234,185)">+248.7</td><td style="background:rgb(191,236,191)">+225.8</td><td style="background:rgb(249,253,249)">+18.9</td></tr><tr><td><b>HBARUSDT</b></td><td style="background:rgb(251,242,242)">-44.8</td><td style="background:rgb(246,252,246)">+30.7</td><td style="background:rgb(214,243,214)">+144.3</td><td style="background:rgb(232,248,232)">+78.4</td><td style="background:rgb(158,226,158)">+345.3</td><td style="background:rgb(254,254,254)">+3.4</td></tr><tr><td><b>LINKUSDT</b></td><td style="background:rgb(235,186,186)">-243.3</td><td style="background:rgb(227,247,227)">+96.7</td><td style="background:rgb(197,238,197)">+206.3</td><td style="background:rgb(254,252,252)">-7.9</td><td style="background:rgb(201,239,201)">+190.6</td><td style="background:rgb(245,252,245)">+33.6</td></tr><tr><td><b>OPUSDT</b></td><td style="background:#b3b3b3">n/a</td><td style="background:rgb(254,253,253)">-4.3</td><td style="background:rgb(242,251,242)">+46.0</td><td style="background:rgb(225,246,225)">+104.8</td><td style="background:rgb(228,247,228)">+95.1</td><td style="background:rgb(237,249,237)">+62.7</td></tr><tr><td><b>XLMUSDT</b></td><td style="background:rgb(251,242,242)">-43.8</td><td style="background:rgb(253,249,249)">-18.0</td><td style="background:rgb(222,245,222)">+114.1</td><td style="background:rgb(246,224,224)">-107.4</td><td style="background:rgb(194,237,194)">+214.6</td><td style="background:rgb(254,254,254)">+1.6</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <h2>6. Exclude list</h2>
+    <table>
+      <thead><tr><th>Symbol</th><th>Reason</th><th>Profit factor by season</th></tr></thead>
+      <tbody><tr><td colspan="3">none</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <h2>7. Methodology note</h2>
+    <p class="small">
+      Composite score uses weighted percentile ranks across symbols with 4+ seasons present:
+      total_pnl (35%), consistency_score (30%), profit_factor (20%), trail_stop_ratio (15%).
+      Trade PnL accounting uses true trade PnL = trades.pnl + sum(partial['pnl'] from partials_json);
+      trades.pnl alone is not treated as final trade result.
+    </p>
+  </section>
+</body>
+</html>
