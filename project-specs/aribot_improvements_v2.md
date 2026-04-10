@@ -194,7 +194,7 @@ Session PnL: +$87.42 | Entries: active
    the 60-minute window.
 
 ### Files affected
-- `usdt_paper_bot_v2.py` (main loop) — add elapsed-time pulse check
+- `aribot/runtime/engine.py` (main loop) — add elapsed-time pulse check
 - `alert_dispatcher.py` — add `send_pulse(status_data)` method
 - `db_schema.py` — add `last_pulse_sent_at` column to `bot_state`
 - `migrate_v2_to_live.sql` — ALTER TABLE bot_state ADD COLUMN

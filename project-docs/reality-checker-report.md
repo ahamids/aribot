@@ -17,7 +17,7 @@ Reason:
 ## Evidence Executed
 
 1) Runtime banned-field grep audit (margin-relative Bybit fields)
-- Command pattern scanned runtime files only: order_executor.py, usdt_paper_bot_v2.py, startup_reconciler.py, migrate_live_schema.py
+- Command pattern scanned runtime files only: order_executor.py, aribot/runtime/engine.py, startup_reconciler.py, migrate_live_schema.py
 - Pattern: unrealizedPnl|unrealisedPnl|initialMargin|positionIM|unrealizedPnlPcnt|unrealisedPnlPcnt
 - Result: no matches
 

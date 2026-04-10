@@ -16,9 +16,9 @@ Out of scope:
 - Leverage pre-check (Branch C)
 
 ## Repo Mapping (spec -> this repo)
-- position_manager/live_bot -> `usdt_paper_bot_v2.py`
+- position_manager/live_bot -> `aribot/runtime/engine.py`
 - reconciler -> `startup_reconciler.py`
-- db schema owner -> `usdt_paper_bot_v2.py` (`setup_database`)
+- db schema owner -> `aribot/runtime/engine.py` (`setup_database`)
 - migration entrypoint -> `migrate_live_schema.py`
 - execution wrapper for exchange calls -> `order_executor.py`
 
@@ -47,7 +47,7 @@ No method raises by default for native-stop failures; they log warning and retur
 
 ### 1) Initial native SL on open (MarkPrice)
 Trigger point:
-- Immediately after a successful entry fill in `usdt_paper_bot_v2.py` when `PaperPosition` is created and persisted.
+- Immediately after a successful entry fill in `aribot/runtime/engine.py` when `PaperPosition` is created and persisted.
 
 Price formula:
 - Long SL: `entry_price * (1 - 0.025)`
@@ -96,7 +96,7 @@ DB flags after success:
 
 ### 3) Native trailing activation (callback = 0.015)
 Trigger point:
-- In `usdt_paper_bot_v2.py` inside `update_positions`, exactly when internal trailing transitions to active (`pos.should_activate_trailing_stop()` branch).
+- In `aribot/runtime/engine.py` inside `update_positions`, exactly when internal trailing transitions to active (`pos.should_activate_trailing_stop()` branch).
 
 Call:
 ```python
@@ -129,7 +129,7 @@ DB flags after successful trailing stage:
 
 ### 4) Clear residual native orders on close
 Trigger point:
-- In `usdt_paper_bot_v2.py` within `close_position`, after exit order is confirmed (or during any local forced close path), before local row deletion.
+- In `aribot/runtime/engine.py` within `close_position`, after exit order is confirmed (or during any local forced close path), before local row deletion.
 
 Primary clear call:
 ```python
@@ -163,7 +163,7 @@ Then force DB flags to off before removing persisted position:
 - `native_trail_active = 0`
 - `native_sl_price = NULL`
 
-## usdt_paper_bot_v2.py Integration Points
+## aribot/runtime/engine.py Integration Points
 
 ### Position open flow
 Current location: entry path that creates `PaperPosition` and calls `persist_position(pos)`.
@@ -208,7 +208,7 @@ This preserves existing startup safety rule: ghost positions remain blocking/cri
 ## SQLite Schema Additions
 
 ### positions table columns (required)
-Add to `usdt_paper_bot_v2.py` `setup_database` for fresh DBs:
+Add to `aribot/runtime/engine.py` `setup_database` for fresh DBs:
 - `native_sl_active INTEGER DEFAULT 0`
 - `native_tp_active INTEGER DEFAULT 0`
 - `native_trail_active INTEGER DEFAULT 0`

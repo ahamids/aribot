@@ -4,7 +4,7 @@
 This design covers Change 3 only: explicit leverage setting before entry market orders in the live execution path.
 
 Target file for implementation: order_executor.py
-Supporting callsite/test hooks: usdt_paper_bot_v2.py and test_live_bot.py
+Supporting callsite/test hooks: aribot/runtime/engine.py and test_live_bot.py
 
 ## Current Baseline
 - Entry orders are submitted through Aribot.open_position -> submit_market_order -> OrderExecutor.execute_order.
@@ -85,7 +85,7 @@ Why keyword-only fields:
 - Preserves existing positional call compatibility.
 - Makes entry-only leverage requirement explicit and harder to misuse.
 
-### 4) submit_market_order hook signature in usdt_paper_bot_v2.py
+### 4) submit_market_order hook signature in aribot/runtime/engine.py
 
 ```python
 def submit_market_order(self, symbol, side, quantity, reason, idempotency_key, leverage=None):
@@ -265,7 +265,7 @@ Assertions:
 - Invoke _ensure_leverage before create_order for entry orders.
 - Catch LeverageSetError and return failed OrderResult after marking idempotency failed.
 
-2. usdt_paper_bot_v2.py
+2. aribot/runtime/engine.py
 - Extend submit_market_order signature to accept leverage=None.
 - Pass order_reason and leverage through to execute_order.
 - Pass leverage from open_position entry call only.

@@ -1,0 +1,11 @@
+runtime:
+  mode: paper
+
+trading:
+  market_quote: USDC
+
+plugins:
+  exchange: bybit
+  strategy: wma45_ohlc4
+  regime_filter: wma_regime
+  risk: default_risk

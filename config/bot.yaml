@@ -1,0 +1,37 @@
+runtime:
+  mode: paper
+  db_path: usdt_bot_v2.db
+
+trading:
+  market_quote: USDT
+
+plugins:
+  exchange: bybit
+  strategy: wma45_ohlc4
+  regime_filter: wma_regime
+  risk: default_risk
+
+bot:
+  db_file: usdt_bot_v2.db
+  leverage_config_file: leverage_buckets.json
+  initial_balance: 400.0
+  max_open_positions: 10
+  max_tick_age_seconds: 600
+  min_24h_volume_quote: 5000000
+  entry_risk_pct: 0.11
+  atr_volatility_cutoff: 0.05
+  atr_size_scalar: 0.5
+  round_trip_fee_rate: 0.0011
+  major_leverage: 5.0
+  large_alt_leverage: 3.0
+  mid_cap_leverage: 2.0
+  default_leverage: 1.0
+  max_hold_minutes: 2400
+  daily_drawdown_limit: -0.05
+  max_consecutive_losses: 3
+  cooldown_candles: 2
+  signal_boundary_window_seconds: 60
+  loop_interval_seconds: 60
+  allow_missing_ticker_timestamp: true
+  max_unchanged_tick_cycles: 2
+  pulse_interval_seconds: 3600

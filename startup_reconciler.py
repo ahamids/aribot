@@ -427,7 +427,7 @@ class StartupReconciler:
             else:
                 pnl = (entry_price - close_price) * qty
             # Keep archived percentage aligned with runtime stop logic: derive only from prices.
-            from usdt_paper_bot_v2 import derive_pnl_pct
+            from aribot.domain.pnl import derive_pnl_pct
 
             pnl_pct = derive_pnl_pct(entry_price, close_price, side)
 

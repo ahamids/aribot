@@ -24,156 +24,47 @@ from observability import FundingTracker, KillSwitchMonitor, StructuredEventLogg
 from order_executor import OrderExecutor
 from secret_loader import SecretLoader, SecretValidationError
 from startup_reconciler import StartupReconciler
+from aribot.domain.indicators import calculate_ohlc4 as domain_calculate_ohlc4
+from aribot.domain.indicators import calculate_wma as domain_calculate_wma
+from aribot.domain.pnl import derive_pnl_pct as domain_derive_pnl_pct
+from aribot.domain.position import PaperPosition
+from aribot.domain.risk_gates import compute_drawdown
+from aribot.domain.risk_gates import compute_loss_cooldown_until
+from aribot.domain.risk_gates import get_entry_gate_block_reason
+from aribot.domain.risk_gates import is_loss_cooldown_active
+from aribot.domain.sizing import compute_entry_sizing
+from aribot.domain.risk_gates import should_reset_daily_session
+from aribot.domain.risk_gates import should_trigger_daily_drawdown_pause
+from aribot.domain.stop_logic import evaluate_exit_reason
+from aribot.domain.stop_logic import should_activate_trailing
+from aribot.domain.stop_logic import should_close_for_hard_stop
+from aribot.domain.stop_logic import update_trailing_if_active
 
 
 def derive_pnl_pct(entry_price, current_price, side):
-    """Return strategy-facing, price-only PnL percent independent of leverage."""
+    """Backward-compatible wrapper around shared domain PnL helper."""
+    return domain_derive_pnl_pct(entry_price, current_price, side)
+
+
+def _as_bool(value, default):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _coerce_setting(settings, key, default, cast):
+    raw = settings.get(key, default)
     try:
-        ep = float(entry_price)
-        cp = float(current_price)
+        return cast(raw)
     except (TypeError, ValueError):
-        return 0.0
-
-    if ep <= 0.0:
-        return 0.0
-
-    normalized_side = str(side or '').strip().lower()
-    if normalized_side in {'long', 'buy'}:
-        return ((cp - ep) / ep) * 100.0
-    if normalized_side in {'short', 'sell'}:
-        return ((ep - cp) / ep) * 100.0
-
-    return 0.0
-
-class PaperPosition:
-    """Represents a paper trading position with advanced management"""
-
-    def __init__(self, symbol, side, entry_price, quantity, timestamp):
-        self.symbol = symbol
-        self.side = side  # 'long' or 'short'
-        self.entry_price = entry_price
-        self.quantity = quantity
-        self.timestamp = timestamp
-        self.stop_loss = None
-        self.trailing_stop_level = None
-        self.current_price = entry_price
-        self.gross_pnl = 0.0
-        self.fee_cost = 0.0
-        self.pnl = 0.0
-        self.pnl_percentage = 0.0
-        self.round_trip_fee_rate = 0.0011
-
-        # Peak tracking
-        self.peak_pnl_percentage = 0.0
-
-        # Revised partial profit settings from improvement report
-        self.profit_taking_levels = [0.02, 0.03, 0.05]  # 2%, 3%, 5%
-        self.profit_taking_sizes = [0.25, 0.25, 0.25]   # 25%, 25%, 25%
-        self.partial_exits = []
-
-        # Revised trailing stop settings from improvement report
-        self.trailing_stop_buffer = 0.015  # 1.5% from peak
-        self.trailing_stop_active = False
-        self.trailing_stop_trigger = 0.02  # activate at 2% profit
-
-        # Branch B native exchange protection state mirrors the SQLite columns.
-        self.native_sl_active = False
-        self.native_tp_active = False
-        self.native_trail_active = False
-        self.native_sl_price = None
-        self.native_stops_cancelled_at = None
-
-    def update_price(self, current_price):
-        self.current_price = current_price
-        if self.side == 'long':
-            self.gross_pnl = (current_price - self.entry_price) * self.quantity
-        else:
-            self.gross_pnl = (self.entry_price - current_price) * self.quantity
-
-        avg_notional = ((self.entry_price + current_price) / 2.0) * self.quantity
-        self.fee_cost = avg_notional * self.round_trip_fee_rate
-        self.pnl = self.gross_pnl - self.fee_cost
-        self.pnl_percentage = derive_pnl_pct(self.entry_price, self.current_price, self.side)
-
-        # Track peak P&L percentage
-        if self.pnl_percentage > self.peak_pnl_percentage:
-            self.peak_pnl_percentage = self.pnl_percentage
-
-    def should_close_for_loss(self):
-        return self.pnl_percentage <= -2.5
-
-    def should_close_for_stop_loss(self):
-        if self.stop_loss is None:
-            return False
-
-        if self.side == 'long':
-            return self.current_price <= self.stop_loss
-        else:
-            return self.current_price >= self.stop_loss
-
-    def should_activate_trailing_stop(self):
-        return self.pnl_percentage >= (self.trailing_stop_trigger * 100) and not self.trailing_stop_active
-
-    def activate_trailing_stop(self):
-        self.trailing_stop_active = True
-        self.update_trailing_stop()
-
-    def update_trailing_stop(self):
-        if not self.trailing_stop_active:
-            return False
-
-        if self.side == 'long':
-            highest_price = self.entry_price * (1 + self.peak_pnl_percentage / 100)
-            level = highest_price * (1 - self.trailing_stop_buffer)
-            if self.trailing_stop_level is None or level > self.trailing_stop_level:
-                self.trailing_stop_level = level
-                return True
-        else:
-            lowest_price = self.entry_price * (1 - self.peak_pnl_percentage / 100)
-            level = lowest_price * (1 + self.trailing_stop_buffer)
-            if self.trailing_stop_level is None or level < self.trailing_stop_level:
-                self.trailing_stop_level = level
-                return True
-
-        return False
-
-    def should_close_for_trailing_stop(self):
-        if not self.trailing_stop_active or self.trailing_stop_level is None:
-            return False
-
-        if self.side == 'long':
-            return self.current_price <= self.trailing_stop_level
-        else:
-            return self.current_price >= self.trailing_stop_level
-
-    def should_take_partial_profit(self):
-        for idx, level in enumerate(self.profit_taking_levels):
-            already_taken = any(exit['level'] == level for exit in self.partial_exits)
-            if not already_taken and self.pnl_percentage >= (level * 100):
-                return idx, level
-        return None
-
-    def take_partial_profit(self, idx, level):
-        size = self.profit_taking_sizes[idx]
-        partial_pnl = self.pnl * size
-        self.partial_exits.append({'level': level, 'size': size, 'pnl': partial_pnl, 'time': datetime.datetime.now()})
-        self.quantity *= (1 - size)
-        return partial_pnl
-
-    def age_minutes(self):
-        timestamp = self.timestamp
-        if isinstance(timestamp, datetime.datetime) and timestamp.tzinfo is not None:
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            ts_utc = timestamp.astimezone(datetime.timezone.utc)
-            return (now_utc - ts_utc).total_seconds() / 60.0
-        return (datetime.datetime.now() - timestamp).total_seconds() / 60.0
-
-    def should_close_for_time(self, max_minutes=1440):
-        return self.age_minutes() >= max_minutes
+        return default
 
 
 class Aribot:
-    def __init__(self, startup_secrets=None, emoji_mode='noemojis'):
+    def __init__(self, startup_secrets=None, emoji_mode='noemojis', bot_settings=None):
+        bot_settings = bot_settings or {}
         self.emoji_mode = normalize_emoji_mode(emoji_mode)
         self.setup_logging(emoji_mode=self.emoji_mode)
         self.bot_mode = str(getattr(startup_secrets, 'bot_mode', os.getenv('BOT_MODE', 'paper'))).strip().lower()
@@ -207,24 +98,25 @@ class Aribot:
         self.positions = {}
         self.closed_trades = []
         self.kill_switch_file = os.getenv('KILL_SWITCH_FILE', 'kill_switch.flag')
-        self.initial_balance = 400.0
+        self.market_quote = str(bot_settings.get('market_quote', 'USDT')).strip().upper() or 'USDT'
+        self.initial_balance = _coerce_setting(bot_settings, 'initial_balance', 400.0, float)
         self.current_balance = self.initial_balance
         self.total_pnl = 0.0
         self.total_trades = 0
         self.winning_trades = 0
         self.losing_trades = 0
-        self.max_open_positions = 10
-        self.max_tick_age_seconds = 600
-        self.min_24h_volume_usdc = 5_000_000
-        self.entry_risk_pct = 0.11 # 11% of current balance per trade
-        self.atr_volatility_cutoff = 0.05
-        self.atr_size_scalar = 0.5
-        self.round_trip_fee_rate = 0.0011
-        self.major_leverage = 5.0
-        self.large_alt_leverage = 3.0
-        self.mid_cap_leverage = 2.0
-        self.default_leverage = 1.0
-        self.leverage_config_file = 'leverage_buckets.json'
+        self.max_open_positions = _coerce_setting(bot_settings, 'max_open_positions', 10, int)
+        self.max_tick_age_seconds = _coerce_setting(bot_settings, 'max_tick_age_seconds', 600, int)
+        self.min_24h_volume_quote = _coerce_setting(bot_settings, 'min_24h_volume_quote', 5_000_000, float)
+        self.entry_risk_pct = _coerce_setting(bot_settings, 'entry_risk_pct', 0.11, float)
+        self.atr_volatility_cutoff = _coerce_setting(bot_settings, 'atr_volatility_cutoff', 0.05, float)
+        self.atr_size_scalar = _coerce_setting(bot_settings, 'atr_size_scalar', 0.5, float)
+        self.round_trip_fee_rate = _coerce_setting(bot_settings, 'round_trip_fee_rate', 0.0011, float)
+        self.major_leverage = _coerce_setting(bot_settings, 'major_leverage', 5.0, float)
+        self.large_alt_leverage = _coerce_setting(bot_settings, 'large_alt_leverage', 3.0, float)
+        self.mid_cap_leverage = _coerce_setting(bot_settings, 'mid_cap_leverage', 2.0, float)
+        self.default_leverage = _coerce_setting(bot_settings, 'default_leverage', 1.0, float)
+        self.leverage_config_file = str(bot_settings.get('leverage_config_file', 'leverage_buckets.json'))
         self.major_coins = {'BTC', 'ETH'}
         self.large_alt_coins = {
             'SOL', 'BNB', 'DOT', 'AVAX', 'XRP', 'ADA', 'LINK', 'MATIC', 'LTC', 'ATOM', 'NEAR'
@@ -233,14 +125,14 @@ class Aribot:
             'ENA', 'INJ', 'OP', 'SEI', 'ARB', 'APT', 'SUI', 'TIA', 'WLD', 'JUP'
         }
         self.load_leverage_config()
-        self.max_hold_minutes = 40 * 60
-        self.daily_drawdown_limit = -0.05
-        self.max_consecutive_losses = 3
-        self.cooldown_candles = 2
-        self.signal_boundary_window_seconds = 60
-        self.loop_interval_seconds = 60
-        self.allow_missing_ticker_timestamp = True
-        self.max_unchanged_tick_cycles = 2
+        self.max_hold_minutes = _coerce_setting(bot_settings, 'max_hold_minutes', 40 * 60, int)
+        self.daily_drawdown_limit = _coerce_setting(bot_settings, 'daily_drawdown_limit', -0.05, float)
+        self.max_consecutive_losses = _coerce_setting(bot_settings, 'max_consecutive_losses', 3, int)
+        self.cooldown_candles = _coerce_setting(bot_settings, 'cooldown_candles', 2, int)
+        self.signal_boundary_window_seconds = _coerce_setting(bot_settings, 'signal_boundary_window_seconds', 60, int)
+        self.loop_interval_seconds = _coerce_setting(bot_settings, 'loop_interval_seconds', 60, int)
+        self.allow_missing_ticker_timestamp = _as_bool(bot_settings.get('allow_missing_ticker_timestamp', True), True)
+        self.max_unchanged_tick_cycles = _coerce_setting(bot_settings, 'max_unchanged_tick_cycles', 2, int)
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         self.current_utc_day = now_utc.date()
@@ -254,14 +146,17 @@ class Aribot:
         self.last_regime_signal = 'UNKNOWN'
         self.tick_observations = {}
         self.timestamp_fallback_warned = set()
-        self.pulse_interval_seconds = 60 * 60
+        self.pulse_interval_seconds = _coerce_setting(bot_settings, 'pulse_interval_seconds', 60 * 60, int)
         self.last_pulse_sent_at_utc = None
 
         self.markets = self.exchange.load_markets()
-        self.usdc_swaps = [symbol for symbol in self.markets.keys() if self.markets[symbol].get('type') == 'swap' and 'USDT' in symbol]
+        self.quote_swaps = [
+            symbol for symbol, market in self.markets.items()
+            if market.get('type') == 'swap' and market.get('quote') == self.market_quote
+        ]
         self.btc_regime_symbol = self.resolve_btc_regime_symbol()
 
-        self.db_file = 'usdt_bot_v2.db'
+        self.db_file = str(bot_settings.get('db_file', 'usdt_bot_v2.db'))
         self.db = sqlite3.connect(self.db_file, detect_types=sqlite3.PARSE_DECLTYPES)
         self.db.row_factory = sqlite3.Row
         self.setup_database()
@@ -324,26 +219,27 @@ class Aribot:
             raise RuntimeError('Telegram end-to-end verification failed in live mode')
         self.logger.warning('📨 Telegram verification failed; continuing because mode is not live')
 
-    def fetch_exchange_usdt_balance(self):
+    def fetch_exchange_quote_balance(self):
         if not self.live_execution_enabled:
             return None
 
         try:
-            balance = self.exchange.fetch_balance()
+            balance = self.fetch_account_balance()
         except Exception as exc:
             self.logger.warning(f"⚠️ Failed to fetch exchange balance: {type(exc).__name__}: {exc}")
             return None
 
-        usdt_bucket = balance.get('USDT') if isinstance(balance, dict) else None
+        quote = getattr(self, 'market_quote', 'USDT')
+        quote_bucket = balance.get(quote) if isinstance(balance, dict) else None
         candidate_values = []
-        if isinstance(usdt_bucket, dict):
+        if isinstance(quote_bucket, dict):
             candidate_values.extend([
-                usdt_bucket.get('total'),
-                usdt_bucket.get('free'),
+                quote_bucket.get('total'),
+                quote_bucket.get('free'),
             ])
         candidate_values.extend([
-            (balance.get('total') or {}).get('USDT') if isinstance(balance.get('total'), dict) else None,
-            (balance.get('free') or {}).get('USDT') if isinstance(balance.get('free'), dict) else None,
+            (balance.get('total') or {}).get(quote) if isinstance(balance.get('total'), dict) else None,
+            (balance.get('free') or {}).get(quote) if isinstance(balance.get('free'), dict) else None,
         ])
 
         for value in candidate_values:
@@ -355,6 +251,19 @@ class Aribot:
                 return amount
         return None
 
+    def fetch_account_balance(self):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'fetch_balance'):
+            return runtime_context.fetch_balance()
+
+        exchange_plugin = self._runtime_plugin('exchange')
+        if exchange_plugin is not None and hasattr(exchange_plugin, 'fetch_balance'):
+            try:
+                return exchange_plugin.fetch_balance()
+            except Exception:
+                return self.exchange.fetch_balance()
+        return self.exchange.fetch_balance()
+
     def sync_account_balance(self, force=False):
         if not self.live_execution_enabled:
             return False
@@ -362,7 +271,7 @@ class Aribot:
             # Shadow mode keeps PnL simulation continuity, but still supports manual forced refresh.
             return False
 
-        exchange_balance = self.fetch_exchange_usdt_balance()
+        exchange_balance = self.fetch_exchange_quote_balance()
         if exchange_balance is None:
             return False
 
@@ -370,7 +279,7 @@ class Aribot:
         self.current_balance = exchange_balance
         if abs(old_balance - self.current_balance) >= 0.01:
             self.logger.info(
-                f"💼 Synced exchange USDT balance: {old_balance:.2f} -> {self.current_balance:.2f}"
+                f"💼 Synced exchange {self.market_quote} balance: {old_balance:.2f} -> {self.current_balance:.2f}"
             )
         self.persist_runtime_state()
         return True
@@ -495,7 +404,7 @@ class Aribot:
 
     def has_fresh_tick(self, symbol):
         try:
-            ticker = self.exchange.fetch_ticker(symbol)
+            ticker = self.fetch_symbol_ticker(symbol)
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             ts_ms, ts_source, is_fallback = self.extract_ticker_timestamp_ms(ticker, now_utc)
             if ts_ms is None:
@@ -586,12 +495,12 @@ class Aribot:
     def resolve_btc_regime_symbol(self):
         candidates = [
             symbol for symbol, market in self.markets.items()
-            if market.get('type') == 'swap' and market.get('base') == 'BTC' and market.get('quote') == 'USDT'
+            if market.get('type') == 'swap' and market.get('base') == 'BTC' and market.get('quote') == self.market_quote
         ]
         if not candidates:
             return None
 
-        preferred = next((s for s in candidates if s.startswith('BTC/USDT')), candidates[0])
+        preferred = next((s for s in candidates if s.startswith(f'BTC/{self.market_quote}')), candidates[0])
         self.logger.info(f"📊 BTC regime symbol resolved to {preferred}")
         return preferred
 
@@ -600,7 +509,7 @@ class Aribot:
             return None
 
         try:
-            ohlcv = self.exchange.fetch_ohlcv(self.btc_regime_symbol, '4h', limit=260)
+            ohlcv = self.fetch_symbol_ohlcv(self.btc_regime_symbol, '4h', limit=260)
             if not ohlcv:
                 self.logger.warning(
                     f"⚠️ BTC regime fetch returned empty OHLCV for {self.btc_regime_symbol}"
@@ -658,9 +567,9 @@ class Aribot:
             self.logger.warning(f"⚠️ Missing 24h quote volume for {symbol}; skipping symbol")
             return False
 
-        if quote_volume <= self.min_24h_volume_usdc:
+        if quote_volume <= self.min_24h_volume_quote:
             self.logger.info(
-                f"⏭️ {symbol} filtered by volume: {quote_volume:.2f} <= {self.min_24h_volume_usdc:.2f}"
+                f"⏭️ {symbol} filtered by volume: {quote_volume:.2f} <= {self.min_24h_volume_quote:.2f}"
             )
             return False
 
@@ -685,7 +594,7 @@ class Aribot:
 
     def reset_daily_session_if_needed(self):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        if now_utc.date() != self.current_utc_day:
+        if should_reset_daily_session(self.current_utc_day, now_utc):
             self.current_utc_day = now_utc.date()
             self.session_start_balance = self.current_balance
             self.daily_drawdown_paused = False
@@ -699,11 +608,12 @@ class Aribot:
             )
 
     def update_daily_drawdown_pause(self):
-        if self.session_start_balance <= 0:
-            return
-
-        drawdown = (self.current_balance - self.session_start_balance) / self.session_start_balance
-        if drawdown <= self.daily_drawdown_limit and not self.daily_drawdown_paused:
+        drawdown = compute_drawdown(self.current_balance, self.session_start_balance)
+        if should_trigger_daily_drawdown_pause(
+            drawdown=drawdown,
+            daily_drawdown_limit=self.daily_drawdown_limit,
+            already_paused=self.daily_drawdown_paused,
+        ):
             self.daily_drawdown_paused = True
             self.logger.warning(
                 f"🛑 Daily drawdown halt triggered: {drawdown * 100:.2f}% <= {self.daily_drawdown_limit * 100:.2f}%"
@@ -722,19 +632,116 @@ class Aribot:
             )
 
     def in_loss_cooldown(self, now_utc=None):
-        if self.cooldown_until_utc is None:
-            return False
         ref_now = now_utc or datetime.datetime.now(datetime.timezone.utc)
-        return ref_now < self.cooldown_until_utc
+        return is_loss_cooldown_active(self.cooldown_until_utc, ref_now)
 
     def entry_gate_block_reason(self, now_utc=None):
-        if self.manual_entry_paused:
-            return 'manual_pause'
-        if self.daily_drawdown_paused:
-            return 'daily_drawdown_pause'
-        if self.in_loss_cooldown(now_utc=now_utc):
-            return 'loss_cooldown'
-        return None
+        return get_entry_gate_block_reason(
+            manual_entry_paused=self.manual_entry_paused,
+            daily_drawdown_paused=self.daily_drawdown_paused,
+            cooldown_active=self.in_loss_cooldown(now_utc=now_utc),
+        )
+
+    def _runtime_plugin(self, key):
+        plugins = getattr(self, 'runtime_plugins', None)
+        if plugins is None:
+            return None
+        return getattr(plugins, key, None)
+
+    def get_trade_symbols(self):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'trade_symbols'):
+            return runtime_context.trade_symbols()
+
+        exchange_plugin = self._runtime_plugin('exchange')
+        if exchange_plugin is not None and hasattr(exchange_plugin, 'list_symbols'):
+            try:
+                symbols = exchange_plugin.list_symbols()
+                if isinstance(symbols, list) and symbols:
+                    return symbols
+            except Exception:
+                pass
+        return list(getattr(self, 'quote_swaps', []))
+
+    def fetch_symbol_ticker(self, symbol):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'fetch_ticker'):
+            return runtime_context.fetch_ticker(symbol)
+
+        exchange_plugin = self._runtime_plugin('exchange')
+        if exchange_plugin is not None and hasattr(exchange_plugin, 'fetch_ticker'):
+            try:
+                return exchange_plugin.fetch_ticker(symbol)
+            except Exception:
+                return self.exchange.fetch_ticker(symbol)
+        return self.exchange.fetch_ticker(symbol)
+
+    def fetch_symbol_ohlcv(self, symbol, timeframe, limit=100):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'fetch_ohlcv'):
+            return runtime_context.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+        exchange_plugin = self._runtime_plugin('exchange')
+        if exchange_plugin is not None and hasattr(exchange_plugin, 'fetch_ohlcv'):
+            try:
+                return exchange_plugin.fetch_ohlcv(symbol, timeframe, limit=limit)
+            except Exception:
+                return self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        return self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+    def get_regime_signal(self):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'regime_signal'):
+            return runtime_context.regime_signal()
+
+        regime_plugin = self._runtime_plugin('regime_filter')
+        if regime_plugin is not None and hasattr(regime_plugin, 'update'):
+            try:
+                return regime_plugin.update()
+            except Exception:
+                return None
+        return self.fetch_btc_regime_signal()
+
+    def analyze_symbol(self, symbol, for_entry=False):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'analyze_symbol'):
+            return runtime_context.analyze_symbol(symbol, for_entry=for_entry)
+
+        strategy_plugin = self._runtime_plugin('strategy')
+        if strategy_plugin is not None and hasattr(strategy_plugin, 'analyze_symbol'):
+            try:
+                return strategy_plugin.analyze_symbol(symbol, for_entry=for_entry)
+            except Exception:
+                return None
+        return self.analyze_market(symbol, for_entry=for_entry)
+
+    def refresh_risk_breakers(self):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'refresh_risk_breakers'):
+            runtime_context.refresh_risk_breakers()
+            return
+
+        risk_plugin = self._runtime_plugin('risk')
+        if risk_plugin is not None and hasattr(risk_plugin, 'refresh_daily_breakers'):
+            try:
+                risk_plugin.refresh_daily_breakers()
+                return
+            except Exception:
+                pass
+        self.update_daily_drawdown_pause()
+
+    def get_entry_gate_reason(self, now_utc=None):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'entry_gate_reason'):
+            return runtime_context.entry_gate_reason(now_utc=now_utc)
+
+        risk_plugin = self._runtime_plugin('risk')
+        if risk_plugin is not None and hasattr(risk_plugin, 'entry_gate_block_reason'):
+            try:
+                return risk_plugin.entry_gate_block_reason(now_utc=now_utc)
+            except Exception:
+                return self.entry_gate_block_reason(now_utc=now_utc)
+        return self.entry_gate_block_reason(now_utc=now_utc)
 
     def _normalize_symbol_set(self, symbols):
         normalized = set()
@@ -1829,16 +1836,10 @@ class Aribot:
                 self.persist_position(pos)
 
     def calculate_wma(self, source_prices, period=45, offset=2):
-        if len(source_prices) < period + offset:
-            return None
-        prices_for_wma = source_prices[:-(offset) if offset > 0 else None]
-        if len(prices_for_wma) < period:
-            return None
-        weights = list(range(1, period + 1))
-        return sum(p * w for p, w in zip(prices_for_wma[-period:], weights)) / sum(weights)
+        return domain_calculate_wma(source_prices, period=period, offset=offset)
 
     def calculate_ohlc4(self, ohlcv_data):
-        return [(c[1] + c[2] + c[3] + c[4]) / 4 for c in ohlcv_data]
+        return domain_calculate_ohlc4(ohlcv_data)
 
     def confirm_signal(self, ohlcv_data, ohlc4_values, wma_values, current_index, signal_type):
         if signal_type not in ['BUY', 'SELL']:
@@ -1871,7 +1872,7 @@ class Aribot:
     def analyze_market(self, symbol, for_entry=False):
         try:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
-            ticker = self.exchange.fetch_ticker(symbol)
+            ticker = self.fetch_symbol_ticker(symbol)
             ts_ms, ts_source, is_fallback = self.extract_ticker_timestamp_ms(ticker, now_utc)
             if ts_ms is None:
                 self.logger.warning(f"⚠️ Missing ticker timestamp for {symbol}; skipping symbol")
@@ -1920,7 +1921,7 @@ class Aribot:
             if for_entry and not self.passes_volume_filter(symbol, ticker):
                 return None
 
-            ohlcv = self.exchange.fetch_ohlcv(symbol, '4h', limit=100)
+            ohlcv = self.fetch_symbol_ohlcv(symbol, '4h', limit=100)
             if not ohlcv or len(ohlcv) < 47:
                 return None
             ohlc4_values = self.calculate_ohlc4(ohlcv)
@@ -1952,16 +1953,22 @@ class Aribot:
             self.logger.info(f"⛔ Position cap reached ({self.max_open_positions}); skipping {symbol}")
             return False
         price = analysis['current_price']
-        risk_pct = self.entry_risk_pct
-        if analysis.get('atr_ratio', 0.0) > self.atr_volatility_cutoff:
-            risk_pct *= self.atr_size_scalar
-
         leverage, leverage_tier = self.get_leverage_for_symbol(symbol)
-
-        gross_notional = self.current_balance * risk_pct * leverage
-        net_notional = gross_notional * (1 - self.round_trip_fee_rate)
-        gross_qty = gross_notional / price
-        qty = net_notional / price
+        sizing = compute_entry_sizing(
+            current_balance=self.current_balance,
+            entry_risk_pct=self.entry_risk_pct,
+            atr_ratio=analysis.get('atr_ratio', 0.0),
+            atr_volatility_cutoff=self.atr_volatility_cutoff,
+            atr_size_scalar=self.atr_size_scalar,
+            leverage=leverage,
+            round_trip_fee_rate=self.round_trip_fee_rate,
+            price=price,
+        )
+        risk_pct = sizing['risk_pct']
+        gross_notional = sizing['gross_notional']
+        net_notional = sizing['net_notional']
+        gross_qty = sizing['gross_qty']
+        qty = sizing['net_qty']
         side = 'long' if analysis['signal'] == 'BUY' else 'short'
         exchange_entry_price = None
         exchange_fill_source = None
@@ -2099,15 +2106,29 @@ class Aribot:
         self.db.commit()
 
     def _apply_native_initial_protection(self, pos):
-        if not self.live_execution_enabled or self.order_executor is None:
-            return
+        runtime_context = getattr(self, 'runtime_context', None)
+        result = None
+        if runtime_context is not None and hasattr(runtime_context, 'set_native_initial_protection'):
+            try:
+                result = runtime_context.set_native_initial_protection(
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    entry_price=pos.entry_price,
+                    quantity=pos.quantity,
+                )
+            except Exception:
+                result = None
 
-        result = self.order_executor.set_native_initial_protection(
-            symbol=pos.symbol,
-            side=pos.side,
-            entry_price=pos.entry_price,
-            quantity=pos.quantity,
-        )
+        if result is None:
+            if not self.live_execution_enabled or self.order_executor is None:
+                return
+            result = self.order_executor.set_native_initial_protection(
+                symbol=pos.symbol,
+                side=pos.side,
+                entry_price=pos.entry_price,
+                quantity=pos.quantity,
+            )
+
         pos.native_sl_active = bool(result.get('native_sl_active', False))
         pos.native_tp_active = bool(result.get('native_tp_active', False))
         pos.native_trail_active = bool(result.get('native_trail_active', False))
@@ -2122,10 +2143,19 @@ class Aribot:
             )
 
     def _apply_native_trailing_protection(self, pos):
-        if not self.live_execution_enabled or self.order_executor is None:
-            return
+        runtime_context = getattr(self, 'runtime_context', None)
+        result = None
+        if runtime_context is not None and hasattr(runtime_context, 'set_native_trailing'):
+            try:
+                result = runtime_context.set_native_trailing(pos.symbol)
+            except Exception:
+                result = None
 
-        result = self.order_executor.set_native_trailing(pos.symbol)
+        if result is None:
+            if not self.live_execution_enabled or self.order_executor is None:
+                return
+            result = self.order_executor.set_native_trailing(pos.symbol)
+
         if result.get('ok', False):
             pos.native_sl_active = False
             pos.native_tp_active = False
@@ -2143,7 +2173,15 @@ class Aribot:
     def _clear_native_protection_on_close(self, pos):
         # Copilot prompt: Close flow must not block on exchange-stop cleanup; clear local flags regardless of API outcome.
         cancelled_at = None
-        if self.live_execution_enabled and self.order_executor is not None:
+        result = None
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'clear_native_protection'):
+            try:
+                result = runtime_context.clear_native_protection(pos.symbol)
+            except Exception:
+                result = None
+
+        if result is None and self.live_execution_enabled and self.order_executor is not None:
             cancel_method = getattr(self.order_executor, 'cancel_all_native_stops', None)
             if not callable(cancel_method):
                 cancel_method = getattr(self.order_executor, 'clear_native_protection', None)
@@ -2155,6 +2193,8 @@ class Aribot:
                     'ok': False,
                     'warnings': [{'operation': 'cancel_all_native_stops', 'error_type': 'missing_method', 'error': 'No native stop cancel method available'}],
                 }
+
+        if result is not None:
             if result.get('ok', False):
                 cancelled_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
             if not result.get('ok', False):
@@ -2267,6 +2307,29 @@ class Aribot:
 
         self._clear_native_protection_on_close(pos)
 
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'finalize_position_close'):
+            try:
+                handled = runtime_context.finalize_position_close(
+                    symbol=symbol,
+                    pos=pos,
+                    reason=reason,
+                    exchange_already_closed=exchange_already_closed,
+                )
+            except Exception:
+                handled = False
+            if handled:
+                return
+
+        self._finalize_position_close(
+            symbol=symbol,
+            pos=pos,
+            reason=reason,
+            exchange_already_closed=exchange_already_closed,
+        )
+
+    def _finalize_position_close(self, symbol, pos, reason, exchange_already_closed=False):
+
         self.current_balance += pos.pnl
         self.total_pnl += pos.pnl
         if pos.pnl > 0:
@@ -2275,10 +2338,16 @@ class Aribot:
         else:
             self.losing_trades += 1
             self.consecutive_losses += 1
-            if self.consecutive_losses >= self.max_consecutive_losses:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            cooldown_until = compute_loss_cooldown_until(
+                consecutive_losses=self.consecutive_losses,
+                max_consecutive_losses=self.max_consecutive_losses,
+                cooldown_candles=self.cooldown_candles,
+                now_utc=now_utc,
+            )
+            if cooldown_until is not None:
                 cooldown_hours = self.cooldown_candles * 4
-                now_utc = datetime.datetime.now(datetime.timezone.utc)
-                self.cooldown_until_utc = now_utc + datetime.timedelta(hours=cooldown_hours)
+                self.cooldown_until_utc = cooldown_until
                 self.logger.warning(
                     f"⏸️ Consecutive-loss cooldown active until {self.cooldown_until_utc.isoformat()}"
                 )
@@ -2349,6 +2418,18 @@ class Aribot:
                     pos.update_price(reconstructed_close)
                     self.persist_position(pos)
 
+                runtime_context = getattr(self, 'runtime_context', None)
+                if runtime_context is not None and hasattr(runtime_context, 'handle_runtime_local_missing_on_exchange'):
+                    try:
+                        handled = runtime_context.handle_runtime_local_missing_on_exchange(
+                            symbol,
+                            reconstructed_close_price=reconstructed_close,
+                        )
+                    except Exception:
+                        handled = False
+                    if handled:
+                        continue
+
                 self.logger.warning(
                     f"⚠️ Runtime reconciliation detected local-only open position for {symbol}; "
                     f"closing locally (exchange already flat)."
@@ -2390,6 +2471,23 @@ class Aribot:
                 exchange_side = 'short'
 
             if qty_diff_pct > 1.0:
+                runtime_context = getattr(self, 'runtime_context', None)
+                if runtime_context is not None and hasattr(runtime_context, 'handle_runtime_quantity_mismatch'):
+                    try:
+                        handled = runtime_context.handle_runtime_quantity_mismatch(
+                            symbol,
+                            pos,
+                            local_qty=local_qty,
+                            exchange_qty=exchange_qty,
+                            qty_diff_pct=qty_diff_pct,
+                            exchange_entry=exchange_entry,
+                            exchange_side=exchange_side,
+                        )
+                    except Exception:
+                        handled = False
+                    if handled:
+                        continue
+
                 self.logger.warning(
                     f"⚠️ Runtime reconciliation quantity mismatch for {symbol}: "
                     f"local={local_qty:.8f}, exchange={exchange_qty:.8f}. Updating local state to exchange truth."
@@ -2421,14 +2519,30 @@ class Aribot:
     def update_positions(self):
         to_close = []
         for symbol, pos in list(self.positions.items()):
-            analysis = self.analyze_market(symbol, for_entry=False)
+            runtime_context = getattr(self, 'runtime_context', None)
+            analysis = None
+            if runtime_context is not None and hasattr(runtime_context, 'analyze_symbol'):
+                try:
+                    analysis = runtime_context.analyze_symbol(symbol, for_entry=False)
+                except Exception:
+                    analysis = None
+            if analysis is None:
+                analysis = self.analyze_market(symbol, for_entry=False)
             if not analysis:
                 continue
             pos.update_price(analysis['current_price'])
             self.persist_position(pos)
 
             # Hard stop is checked immediately after every price refresh.
-            if pos.should_close_for_loss():
+            hard_stop_hit = False
+            if runtime_context is not None and hasattr(runtime_context, 'should_close_for_hard_stop'):
+                try:
+                    hard_stop_hit = bool(runtime_context.should_close_for_hard_stop(pos))
+                except Exception:
+                    hard_stop_hit = False
+            if not hard_stop_hit:
+                hard_stop_hit = should_close_for_hard_stop(pos)
+            if hard_stop_hit:
                 to_close.append((symbol, 'stop_loss'))
                 continue
 
@@ -2436,110 +2550,162 @@ class Aribot:
             partial = pos.should_take_partial_profit()
             if partial:
                 idx, level = partial
-                if self.live_execution_enabled:
-                    partial_qty = pos.quantity * pos.profit_taking_sizes[idx]
-                    if partial_qty > 0:
-                        partial_side = 'sell' if pos.side == 'long' else 'buy'
-                        order_key = f"partial:{symbol}:{partial_side}:{int(time.time() // 60)}:{idx}"
-                        ok, order_data = self.submit_market_order(
-                            symbol=symbol,
-                            side=partial_side,
-                            quantity=partial_qty,
-                            reason='partial_profit',
-                            idempotency_key=order_key,
-                        )
-                        if not ok:
-                            continue
-                        fill_price, filled_qty = self.extract_order_fill(
-                            order_data,
-                            fallback_price=pos.current_price,
-                            fallback_qty=partial_qty,
-                        )
-                        if filled_qty <= 0:
-                            continue
-                        pos.update_price(fill_price)
-                        original_qty = pos.quantity
-                        realized_ratio = min(1.0, filled_qty / original_qty) if original_qty > 0 else 0.0
-                        partial_pnl = pos.pnl * realized_ratio
-                        pos.partial_exits.append({'level': level, 'size': realized_ratio, 'pnl': partial_pnl, 'time': datetime.datetime.now()})
-                        pos.quantity = max(0.0, original_qty - filled_qty)
-                        self.current_balance += partial_pnl
-                        self.total_pnl += partial_pnl
-                        self.record_partial_realization(symbol, level, realized_ratio, partial_pnl)
-                        self.persist_runtime_state()
-                        self.logger.info(f"💰 LIVE PARTIAL EXIT {symbol} at {level*100:.1f}% -> {partial_pnl:.2f}")
-                        self.emit_structured_event(
-                            'INFO',
-                            'partial_exit',
-                            'execution',
-                            'Partial profit realized from exchange fill.',
-                            symbol=symbol,
-                            values={
-                                'level': level,
-                                'size': realized_ratio,
-                                'pnl': partial_pnl,
-                                'filled_qty': filled_qty,
-                                'fill_price': fill_price,
-                            },
-                        )
-                        self.persist_position(pos)
-                        if pos.quantity <= 0:
-                            to_close.append((symbol, 'partial_exit_complete'))
+                delegated = False
+                if runtime_context is not None and hasattr(runtime_context, 'handle_partial_profit'):
+                    try:
+                        result = runtime_context.handle_partial_profit(symbol, pos, idx, level, to_close)
+                    except Exception:
+                        result = None
+                    if isinstance(result, dict) and result.get('handled'):
+                        delegated = True
+                        if result.get('skip_symbol'):
                             continue
 
-                partial_pnl = pos.take_partial_profit(idx, level)
+                if not delegated:
+                    if self._handle_partial_profit(symbol, pos, idx, level, to_close):
+                        continue
+
+            should_activate = False
+            if runtime_context is not None and hasattr(runtime_context, 'should_activate_trailing'):
+                try:
+                    should_activate = bool(runtime_context.should_activate_trailing(pos))
+                except Exception:
+                    should_activate = False
+            if not should_activate:
+                should_activate = should_activate_trailing(pos)
+
+            if should_activate:
+                if runtime_context is not None and hasattr(runtime_context, 'handle_trailing_activation'):
+                    try:
+                        handled = runtime_context.handle_trailing_activation(symbol, pos)
+                    except Exception:
+                        handled = False
+                    if handled:
+                        pass
+                    else:
+                        pos.activate_trailing_stop()
+                        self.logger.info(f"🎯 TRAILING ACTIVATED {symbol} level={pos.trailing_stop_level:.8f}")
+                        # Copilot prompt: When trailing activates, switch exchange protection from fixed SL/TP to trailing fallback.
+                        self._apply_native_trailing_protection(pos)
+                        self.persist_position(pos)
+                else:
+                    pos.activate_trailing_stop()
+                    self.logger.info(f"🎯 TRAILING ACTIVATED {symbol} level={pos.trailing_stop_level:.8f}")
+                    # Copilot prompt: When trailing activates, switch exchange protection from fixed SL/TP to trailing fallback.
+                    self._apply_native_trailing_protection(pos)
+                    self.persist_position(pos)
+
+            runtime_context = getattr(self, 'runtime_context', None)
+            trailing_updated = False
+            if runtime_context is not None and hasattr(runtime_context, 'handle_trailing_update'):
+                try:
+                    trailing_updated = bool(runtime_context.handle_trailing_update(symbol, pos))
+                except Exception:
+                    trailing_updated = False
+            if not trailing_updated and update_trailing_if_active(pos):
+                self.logger.info(f"📈 TRAIL UPDATED {symbol} level={pos.trailing_stop_level:.8f}")
+                self.persist_position(pos)
+
+            reason = None
+            if runtime_context is not None and hasattr(runtime_context, 'determine_exit_reason'):
+                try:
+                    reason = runtime_context.determine_exit_reason(pos, self.max_hold_minutes)
+                except Exception:
+                    reason = None
+            if reason is None:
+                reason = evaluate_exit_reason(pos, self.max_hold_minutes)
+            if reason is not None:
+                to_close.append((symbol, reason))
+                continue
+
+        delegated_close = False
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'close_queued_positions'):
+            try:
+                runtime_context.close_queued_positions(list(to_close))
+                delegated_close = True
+            except Exception:
+                delegated_close = False
+
+        if not delegated_close:
+            for symbol, reason in to_close:
+                self.close_position(symbol, reason)
+
+    def _handle_partial_profit(self, symbol, pos, idx, level, to_close):
+        if self.live_execution_enabled:
+            partial_qty = pos.quantity * pos.profit_taking_sizes[idx]
+            if partial_qty > 0:
+                partial_side = 'sell' if pos.side == 'long' else 'buy'
+                order_key = f"partial:{symbol}:{partial_side}:{int(time.time() // 60)}:{idx}"
+                ok, order_data = self.submit_market_order(
+                    symbol=symbol,
+                    side=partial_side,
+                    quantity=partial_qty,
+                    reason='partial_profit',
+                    idempotency_key=order_key,
+                )
+                if not ok:
+                    return True
+                fill_price, filled_qty = self.extract_order_fill(
+                    order_data,
+                    fallback_price=pos.current_price,
+                    fallback_qty=partial_qty,
+                )
+                if filled_qty <= 0:
+                    return True
+                pos.update_price(fill_price)
+                original_qty = pos.quantity
+                realized_ratio = min(1.0, filled_qty / original_qty) if original_qty > 0 else 0.0
+                partial_pnl = pos.pnl * realized_ratio
+                pos.partial_exits.append({'level': level, 'size': realized_ratio, 'pnl': partial_pnl, 'time': datetime.datetime.now()})
+                pos.quantity = max(0.0, original_qty - filled_qty)
                 self.current_balance += partial_pnl
                 self.total_pnl += partial_pnl
-                self.record_partial_realization(symbol, level, pos.profit_taking_sizes[idx], partial_pnl)
+                self.record_partial_realization(symbol, level, realized_ratio, partial_pnl)
                 self.persist_runtime_state()
-                self.logger.info(f"💰 PARTIAL EXIT {symbol} at {level*100:.1f}% -> {partial_pnl:.2f}")
+                self.logger.info(f"💰 LIVE PARTIAL EXIT {symbol} at {level*100:.1f}% -> {partial_pnl:.2f}")
                 self.emit_structured_event(
                     'INFO',
                     'partial_exit',
                     'execution',
-                    'Partial profit realized.',
+                    'Partial profit realized from exchange fill.',
                     symbol=symbol,
                     values={
                         'level': level,
-                        'size': pos.profit_taking_sizes[idx],
+                        'size': realized_ratio,
                         'pnl': partial_pnl,
+                        'filled_qty': filled_qty,
+                        'fill_price': fill_price,
                     },
                 )
                 self.persist_position(pos)
                 if pos.quantity <= 0:
                     to_close.append((symbol, 'partial_exit_complete'))
-                    continue
+                    return True
 
-            if pos.should_activate_trailing_stop():
-                pos.activate_trailing_stop()
-                self.logger.info(f"🎯 TRAILING ACTIVATED {symbol} level={pos.trailing_stop_level:.8f}")
-                # Copilot prompt: When trailing activates, switch exchange protection from fixed SL/TP to trailing fallback.
-                self._apply_native_trailing_protection(pos)
-                self.persist_position(pos)
-
-            if pos.trailing_stop_active and pos.update_trailing_stop():
-                self.logger.info(f"📈 TRAIL UPDATED {symbol} level={pos.trailing_stop_level:.8f}")
-                self.persist_position(pos)
-
-            if pos.should_close_for_trailing_stop():
-                to_close.append((symbol, 'TRAILING_STOP'))
-                continue
-
-            # Static SL from old rule is redundant - trailing stop takes over
-            # if pos.should_set_stop_loss() and pos.stop_loss is None:
-            #     pos.set_static_stop_loss()
-            #     self.logger.info(f"📌 STATIC SL SET {symbol} stop_loss={pos.stop_loss:.8f}")
-
-            if pos.should_close_for_stop_loss():
-                to_close.append((symbol, 'SL_HIT'))
-                continue
-
-            if pos.should_close_for_time(self.max_hold_minutes):
-                to_close.append((symbol, 'time_exit'))
-                continue
-
-        for symbol, reason in to_close:
-            self.close_position(symbol, reason)
+        partial_pnl = pos.take_partial_profit(idx, level)
+        self.current_balance += partial_pnl
+        self.total_pnl += partial_pnl
+        self.record_partial_realization(symbol, level, pos.profit_taking_sizes[idx], partial_pnl)
+        self.persist_runtime_state()
+        self.logger.info(f"💰 PARTIAL EXIT {symbol} at {level*100:.1f}% -> {partial_pnl:.2f}")
+        self.emit_structured_event(
+            'INFO',
+            'partial_exit',
+            'execution',
+            'Partial profit realized.',
+            symbol=symbol,
+            values={
+                'level': level,
+                'size': pos.profit_taking_sizes[idx],
+                'pnl': partial_pnl,
+            },
+        )
+        self.persist_position(pos)
+        if pos.quantity <= 0:
+            to_close.append((symbol, 'partial_exit_complete'))
+            return True
+        return False
 
     def display_status(self):
         self.logger.info('--- BOT STATUS ---')
@@ -2559,6 +2725,50 @@ class Aribot:
                 )
         else:
             self.logger.info('No open positions')
+
+    def scan_entries_window(self, cycle):
+        runtime_context = getattr(self, 'runtime_context', None)
+        if runtime_context is not None and hasattr(runtime_context, 'scan_entries_window'):
+            return runtime_context.scan_entries_window(cycle)
+
+        signals = 0
+
+        if cycle == 1 and not self.is_signal_window():
+            self.logger.info('🚦 Cycle 1 bootstrap: evaluating new entry signals outside 4H window')
+        else:
+            self.logger.info('🕓 4H close window active: evaluating new entry signals')
+
+        regime_signal = self.get_regime_signal()
+        self.last_regime_signal = regime_signal or 'UNAVAILABLE'
+        if regime_signal is None:
+            self.logger.warning('⚠️ BTC regime unavailable; skipping new entries this window')
+            return signals
+
+        self.logger.info(f'📈 BTC regime gate active: {regime_signal}-only entries')
+        for symbol in self.get_trade_symbols():
+            gate_reason = self.get_entry_gate_reason(now_utc=datetime.datetime.now(datetime.timezone.utc))
+            if gate_reason == 'manual_pause':
+                self.logger.info('⏸️ Manual pause active: skipping new entries')
+                break
+            if gate_reason == 'daily_drawdown_pause':
+                self.logger.info('🛑 Daily drawdown pause active: skipping new entries')
+                break
+            if gate_reason == 'loss_cooldown':
+                self.logger.info(f"⏸️ Loss cooldown active until {self.cooldown_until_utc.isoformat()}: skipping new entries")
+                break
+            if len(self.positions) >= self.max_open_positions:
+                self.logger.info(f"⛔ Position cap reached ({self.max_open_positions}); stopping signal scan")
+                break
+
+            anal = self.analyze_symbol(symbol, for_entry=True)
+            if anal and anal['confirmed']:
+                if anal['signal'] != regime_signal:
+                    continue
+                if self.open_position(anal):
+                    signals += 1
+            time.sleep(0.05)
+
+        return signals
 
     def run(self):
         self.logger.info('🚀 Starting paper_bot_v2...')
@@ -2592,46 +2802,14 @@ class Aribot:
             self.poll_telegram_commands_once(cycle)
             self.sync_account_balance(force=False)
             self.reset_daily_session_if_needed()
-            self.update_daily_drawdown_pause()
+            self.refresh_risk_breakers()
             self.reconcile_runtime_positions_with_exchange()
             self.update_positions()
 
             signals = 0
             should_scan_entries = (cycle == 1) or self.is_signal_window()
             if should_scan_entries:
-                if cycle == 1 and not self.is_signal_window():
-                    self.logger.info('🚦 Cycle 1 bootstrap: evaluating new entry signals outside 4H window')
-                else:
-                    self.logger.info('🕓 4H close window active: evaluating new entry signals')
-                regime_signal = self.fetch_btc_regime_signal()
-                self.last_regime_signal = regime_signal or 'UNAVAILABLE'
-                if regime_signal is None:
-                    self.logger.warning('⚠️ BTC regime unavailable; skipping new entries this window')
-                else:
-                    self.logger.info(f'📈 BTC regime gate active: {regime_signal}-only entries')
-                for symbol in self.usdc_swaps:
-                    gate_reason = self.entry_gate_block_reason()
-                    if gate_reason == 'manual_pause':
-                        self.logger.info('⏸️ Manual pause active: skipping new entries')
-                        break
-                    if gate_reason == 'daily_drawdown_pause':
-                        self.logger.info('🛑 Daily drawdown pause active: skipping new entries')
-                        break
-                    if gate_reason == 'loss_cooldown':
-                        self.logger.info(f"⏸️ Loss cooldown active until {self.cooldown_until_utc.isoformat()}: skipping new entries")
-                        break
-                    if regime_signal is None:
-                        break
-                    if len(self.positions) >= self.max_open_positions:
-                        self.logger.info(f"⛔ Position cap reached ({self.max_open_positions}); stopping signal scan")
-                        break
-                    anal = self.analyze_market(symbol, for_entry=True)
-                    if anal and anal['confirmed']:
-                        if anal['signal'] != regime_signal:
-                            continue
-                        if self.open_position(anal):
-                            signals += 1
-                    time.sleep(0.05)
+                signals = self.scan_entries_window(cycle)
             else:
                 self.logger.info('⏭️ Outside 4H close window: skipping new entry scan this cycle')
 

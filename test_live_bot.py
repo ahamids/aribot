@@ -24,7 +24,7 @@ from alert_dispatcher import AlertDispatcher
 from observability import FundingTracker
 from order_executor import OrderExecutor
 from startup_reconciler import StartupReconciler
-from usdt_paper_bot_v2 import PaperPosition, Aribot, derive_pnl_pct
+from aribot.runtime.engine import PaperPosition, Aribot, derive_pnl_pct
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')

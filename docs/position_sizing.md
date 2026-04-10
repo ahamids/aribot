@@ -1,8 +1,8 @@
 I’ll quantify the implemented sizing model first (formulas + bucket leverage settings), then I’ll compute real risk/exposure from your logged trades to identify optimization headroom on a $10,000 balance.
 
-Read [](file:///c%3A/code/aribot/usdt_paper_bot_v2.py#160-160), lines 160 to 210
+Read [aribot/runtime/engine.py](aribot/runtime/engine.py), startup settings and risk configuration section.
 
-Read [](file:///c%3A/code/aribot/usdt_paper_bot_v2.py#995-995), lines 995 to 1038
+Read [aribot/runtime/engine.py](aribot/runtime/engine.py), entry sizing and position-open flow.
 
 Read [](file:///c%3A/code/aribot/leverage_buckets.json)
 
@@ -38,7 +38,7 @@ Yes, there is meaningful room for optimization. Current implementation is conser
 
 ## Current Implemented Sizing Model
 
-From [usdt_paper_bot_v2.py](usdt_paper_bot_v2.py#L175), [usdt_paper_bot_v2.py](usdt_paper_bot_v2.py#L1003), [usdt_paper_bot_v2.py](usdt_paper_bot_v2.py#L1009), [usdt_paper_bot_v2.py](usdt_paper_bot_v2.py#L77), [leverage_buckets.json](leverage_buckets.json):
+From [aribot/runtime/engine.py](aribot/runtime/engine.py), [leverage_buckets.json](leverage_buckets.json):
 
 - Base sizing:
   - $N_{gross} = \text{balance} \times 0.015 \times \text{leverage}$
@@ -81,14 +81,14 @@ Your risk budget is currently underused most of the time, due to:
 ## Practical Optimization Options (highest impact first)
 
 1. Increase base entry risk moderately
-- Change usdt_paper_bot_v2.py from 0.015 to 0.025 or 0.03.
+- Change aribot/runtime/engine.py from 0.015 to 0.025 or 0.03.
 - Effect: linear increase in all notionals.
 - Example at 5x:
   - 0.015 -> $750
   - 0.03 -> $1,500
 
 2. Make ATR sizing smoother instead of binary halving
-- Current binary rule at usdt_paper_bot_v2.py is coarse and often too punitive.
+- Current binary rule at aribot/runtime/engine.py is coarse and often too punitive.
 - Replace with scaled factor (for example clamp 0.6-1.0 or 0.5-1.2 based on ATR ratio).
 
 3. Raise default bucket leverage (if symbol quality justifies)
@@ -100,4 +100,4 @@ Your risk budget is currently underused most of the time, due to:
 - This compensates for your low average concurrency.
 
 5. Keep portfolio drawdown guard aligned
-- If you increase sizing, review usdt_paper_bot_v2.py (`daily_drawdown_limit = -0.05`) so breaker behavior remains intentional.
+- If you increase sizing, review aribot/runtime/engine.py (`daily_drawdown_limit = -0.05`) so breaker behavior remains intentional.
