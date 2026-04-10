@@ -7,9 +7,9 @@ This script is intentionally separate from live bot execution and provides:
 
 The strategy logic is aligned with usdt_paper_bot_v2.py where practical:
 - OHLC4 source, WMA(45, offset=2)
-- BTC regime gate via WMA(200, offset=0)
+- BTC regime gate via WMA(90, offset=0)
 - hard stop -2.5%
-- partial exits 2/3/5 with 30/30/40 sizing
+- partial exits 2/3/5 with 25/25/25 sizing
 - trailing activation at +2% with 1.5% callback
 - time exit at 40h
 - ATR risk scalar and leverage buckets
@@ -76,6 +76,13 @@ class BacktestConfig:
     initial_balance: float = 400.0
     max_open_positions: int = 10
     entry_risk_pct: float = 0.11
+    signal_source: str = "ohlc4"
+    signal_wma_period: int = 45
+    signal_wma_offset: int = 2
+    btc_regime_source: str = "ohlc4"
+    btc_regime_wma_period: int = 90
+    btc_regime_wma_offset: int = 0
+    atr_period: int = 14
     atr_volatility_cutoff: float = 0.05
     atr_size_scalar: float = 0.5
     round_trip_fee_rate: float = 0.0011
@@ -83,11 +90,19 @@ class BacktestConfig:
     trailing_trigger_pct: float = 0.02
     trailing_buffer_pct: float = 0.015
     partial_levels: Tuple[float, ...] = (0.02, 0.03, 0.05)
-    partial_sizes: Tuple[float, ...] = (0.30, 0.30, 0.40)
+    partial_sizes: Tuple[float, ...] = (0.25, 0.25, 0.25)
     max_hold_minutes: int = 40 * 60
     daily_drawdown_limit: float = -0.05
     max_consecutive_losses: int = 3
     cooldown_candles: int = 2
+    macd_fast_period: int = 2
+    macd_slow_period: int = 39
+    macd_signal_period: int = 6
+    stoch_rsi_period: int = 14
+    stoch_rsi_k_period: int = 3
+    stoch_rsi_d_period: int = 3
+    require_macd_confirmation: bool = False
+    require_stoch_rsi_confirmation: bool = False
 
 
 class SQLiteStore:
@@ -692,6 +707,141 @@ def calculate_ohlc4(candles: List[Candle]) -> List[float]:
     ]
 
 
+def calculate_source_series(candles: List[Candle], source: str) -> List[float]:
+    normalized = str(source or "ohlc4").strip().lower()
+    if normalized == "open":
+        return [c.open_price for c in candles]
+    if normalized == "high":
+        return [c.high_price for c in candles]
+    if normalized == "low":
+        return [c.low_price for c in candles]
+    if normalized == "close":
+        return [c.close_price for c in candles]
+    if normalized == "hl2":
+        return [(c.high_price + c.low_price) / 2.0 for c in candles]
+    if normalized == "hlc3":
+        return [(c.high_price + c.low_price + c.close_price) / 3.0 for c in candles]
+    if normalized == "ohlc4":
+        return calculate_ohlc4(candles)
+    raise ValueError(f"Unsupported source: {source}")
+
+
+def normalize_percent_to_ratio(value: float) -> float:
+    # Accept either ratio values (0.025) or percentage values (2.5).
+    if abs(value) > 1.0:
+        return value / 100.0
+    return value
+
+
+def parse_float_csv(raw: str, field_name: str) -> Tuple[float, ...]:
+    items = [x.strip() for x in str(raw).split(",") if x.strip()]
+    if not items:
+        raise ValueError(f"{field_name} cannot be empty")
+    out: List[float] = []
+    for item in items:
+        try:
+            out.append(float(item))
+        except ValueError as exc:
+            raise ValueError(f"Invalid numeric value in {field_name}: {item}") from exc
+    return tuple(out)
+
+
+def apply_leverage_overrides(leverage_buckets: dict, args: argparse.Namespace) -> None:
+    if args.major_leverage is not None:
+        leverage_buckets["major"]["leverage"] = float(args.major_leverage)
+    if args.large_alt_leverage is not None:
+        leverage_buckets["large_alt"]["leverage"] = float(args.large_alt_leverage)
+    if args.mid_cap_leverage is not None:
+        leverage_buckets["mid_cap"]["leverage"] = float(args.mid_cap_leverage)
+    if args.default_leverage is not None:
+        leverage_buckets["default_leverage"] = float(args.default_leverage)
+
+
+def validate_backtest_config(config: BacktestConfig) -> None:
+    allowed_sources = {"open", "high", "low", "close", "hl2", "hlc3", "ohlc4"}
+    if config.signal_source not in allowed_sources:
+        raise ValueError(f"Unsupported signal source: {config.signal_source}")
+    if config.btc_regime_source not in allowed_sources:
+        raise ValueError(f"Unsupported BTC regime source: {config.btc_regime_source}")
+
+    if config.signal_wma_period <= 0 or config.btc_regime_wma_period <= 0:
+        raise ValueError("WMA periods must be positive")
+    if config.atr_period <= 0:
+        raise ValueError("ATR period must be positive")
+    if config.macd_fast_period <= 0 or config.macd_slow_period <= 0 or config.macd_signal_period <= 0:
+        raise ValueError("MACD periods must be positive")
+    if config.stoch_rsi_period <= 0 or config.stoch_rsi_k_period <= 0 or config.stoch_rsi_d_period <= 0:
+        raise ValueError("Stochastic RSI periods must be positive")
+
+    if config.hard_stop_pct < 0:
+        raise ValueError("Hard stop percent must be non-negative")
+    if config.trailing_trigger_pct < 0 or config.trailing_buffer_pct < 0:
+        raise ValueError("Trailing trigger/callback must be non-negative")
+    if config.max_hold_minutes <= 0:
+        raise ValueError("Time exit must be positive")
+
+    if len(config.partial_levels) != len(config.partial_sizes):
+        raise ValueError("partial-levels and partial-sizes must have the same number of elements")
+    if any(level <= 0 for level in config.partial_levels):
+        raise ValueError("Partial levels must all be > 0")
+    if any(size <= 0 for size in config.partial_sizes):
+        raise ValueError("Partial sizes must all be > 0")
+    if sum(config.partial_sizes) > 1.0 + 1e-9:
+        raise ValueError("Sum of partial sizes cannot exceed 1.0 (100%)")
+
+
+def collect_provided_cli_flags(argv_tokens: List[str]) -> set:
+    out = set()
+    for token in argv_tokens:
+        if not token.startswith("--"):
+            continue
+        flag = token.split("=", 1)[0]
+        out.add(flag)
+    return out
+
+
+def apply_run_recipe(args: argparse.Namespace) -> None:
+    if getattr(args, "command", None) != "run":
+        return
+
+    recipe = str(getattr(args, "recipe", "") or "").strip().lower()
+    if not recipe:
+        return
+    if recipe != "baseline":
+        raise ValueError(f"Unsupported recipe: {recipe}")
+
+    provided_flags = set(getattr(args, "_provided_flags", set()))
+
+    baseline_values = {
+        "signal_source": ("ohlc4", "--signal-source"),
+        "signal_wma_period": (45, "--signal-wma-period"),
+        "signal_wma_offset": (2, "--signal-wma-offset"),
+        "btc_regime_source": ("ohlc4", "--btc-regime-source"),
+        "btc_regime_wma_period": (90, "--btc-regime-wma-period"),
+        "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+        "hard_stop_pct": (2.5, "--hard-stop-pct"),
+        "partial_levels": ("2,3,5", "--partial-levels"),
+        "partial_sizes": ("25,25,25", "--partial-sizes"),
+        "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+        "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+        "time_exit_hours": (40.0, "--time-exit-hours"),
+        "atr_period": (14, "--atr-period"),
+        "atr_volatility_cutoff_pct": (5.0, "--atr-volatility-cutoff-pct"),
+        "atr_size_scalar": (0.5, "--atr-size-scalar"),
+        "macd_fast": (2, "--macd-fast"),
+        "macd_slow": (39, "--macd-slow"),
+        "macd_signal": (6, "--macd-signal"),
+        "stoch_rsi_period": (14, "--stoch-rsi-period"),
+        "stoch_rsi_k": (3, "--stoch-rsi-k"),
+        "stoch_rsi_d": (3, "--stoch-rsi-d"),
+    }
+
+    for field_name, (baseline_value, controlling_flag) in baseline_values.items():
+        if controlling_flag in provided_flags:
+            continue
+        setattr(args, field_name, baseline_value)
+
+
 def calculate_wma_at(source_prices: List[float], idx: int, period: int = 45, offset: int = 2) -> Optional[float]:
     if idx < 0:
         return None
@@ -729,6 +879,144 @@ def calculate_atr(candles: List[Candle], idx: int, period: int = 14) -> Optional
     if len(trs) < period:
         return None
     return sum(trs[-period:]) / period
+
+
+def calculate_ema_series(values: List[float], period: int) -> List[Optional[float]]:
+    if period <= 0:
+        raise ValueError("EMA period must be positive")
+
+    out: List[Optional[float]] = [None] * len(values)
+    if len(values) < period:
+        return out
+
+    multiplier = 2.0 / (period + 1)
+    ema = sum(values[:period]) / period
+    out[period - 1] = ema
+
+    for idx in range(period, len(values)):
+        ema = ((values[idx] - ema) * multiplier) + ema
+        out[idx] = ema
+
+    return out
+
+
+def calculate_macd_diff_series(
+    values: List[float],
+    fast_period: int = 2,
+    slow_period: int = 39,
+    signal_period: int = 6,
+) -> List[Optional[float]]:
+    fast_ema = calculate_ema_series(values, fast_period)
+    slow_ema = calculate_ema_series(values, slow_period)
+
+    macd_line: List[Optional[float]] = [None] * len(values)
+    macd_values: List[float] = []
+    macd_indexes: List[int] = []
+    for idx in range(len(values)):
+        fast = fast_ema[idx]
+        slow = slow_ema[idx]
+        if fast is None or slow is None:
+            continue
+        value = fast - slow
+        macd_line[idx] = value
+        macd_values.append(value)
+        macd_indexes.append(idx)
+
+    signal_partial = calculate_ema_series(macd_values, signal_period)
+    out: List[Optional[float]] = [None] * len(values)
+    for series_idx, candle_idx in enumerate(macd_indexes):
+        signal = signal_partial[series_idx]
+        macd = macd_line[candle_idx]
+        if signal is None or macd is None:
+            continue
+        out[candle_idx] = macd - signal
+    return out
+
+
+def calculate_rsi_series(values: List[float], period: int = 14) -> List[Optional[float]]:
+    out: List[Optional[float]] = [None] * len(values)
+    if period <= 0 or len(values) <= period:
+        return out
+
+    gains: List[float] = []
+    losses: List[float] = []
+    for idx in range(1, period + 1):
+        change = values[idx] - values[idx - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+
+    if avg_loss == 0:
+        out[period] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        out[period] = 100.0 - (100.0 / (1.0 + rs))
+
+    for idx in range(period + 1, len(values)):
+        change = values[idx] - values[idx - 1]
+        gain = max(change, 0.0)
+        loss = max(-change, 0.0)
+        avg_gain = ((avg_gain * (period - 1)) + gain) / period
+        avg_loss = ((avg_loss * (period - 1)) + loss) / period
+
+        if avg_loss == 0:
+            out[idx] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            out[idx] = 100.0 - (100.0 / (1.0 + rs))
+
+    return out
+
+
+def calculate_sma_optional_series(values: List[Optional[float]], period: int) -> List[Optional[float]]:
+    out: List[Optional[float]] = [None] * len(values)
+    if period <= 0:
+        raise ValueError("SMA period must be positive")
+
+    window: List[float] = []
+    for idx, value in enumerate(values):
+        if value is None:
+            window = []
+            continue
+        window.append(value)
+        if len(window) > period:
+            window.pop(0)
+        if len(window) == period:
+            out[idx] = sum(window) / period
+    return out
+
+
+def calculate_stoch_rsi_series(
+    values: List[float],
+    rsi_period: int = 14,
+    k_period: int = 3,
+    d_period: int = 3,
+) -> Tuple[List[Optional[float]], List[Optional[float]]]:
+    rsi_series = calculate_rsi_series(values, period=rsi_period)
+    stoch_raw: List[Optional[float]] = [None] * len(values)
+
+    for idx in range(len(values)):
+        if idx < rsi_period:
+            continue
+        window = rsi_series[idx - rsi_period + 1 : idx + 1]
+        if len(window) < rsi_period or any(value is None for value in window):
+            continue
+        typed_window = [float(value) for value in window if value is not None]
+        lowest = min(typed_window)
+        highest = max(typed_window)
+        current = rsi_series[idx]
+        if current is None:
+            continue
+        if math.isclose(highest, lowest):
+            stoch_raw[idx] = 0.0
+        else:
+            stoch_raw[idx] = ((current - lowest) / (highest - lowest)) * 100.0
+
+    k_series = calculate_sma_optional_series(stoch_raw, k_period)
+    d_series = calculate_sma_optional_series(k_series, d_period)
+    return k_series, d_series
 
 
 def confirm_signal(
@@ -1017,6 +1305,13 @@ class BacktestRunner:
 
         self.candle_map: Dict[str, List[Candle]] = {}
         self.time_to_index: Dict[str, Dict[int, int]] = {}
+        self.ohlc4_map: Dict[str, List[float]] = {}
+        self.wma45_map: Dict[str, List[Optional[float]]] = {}
+        self.atr14_map: Dict[str, List[Optional[float]]] = {}
+        self.macd_diff_map: Dict[str, List[Optional[float]]] = {}
+        self.stoch_rsi_k_map: Dict[str, List[Optional[float]]] = {}
+        self.stoch_rsi_d_map: Dict[str, List[Optional[float]]] = {}
+        self.btc_regime_by_time: Dict[int, str] = {}
 
         self.balance = config.initial_balance
         self.initial_balance = config.initial_balance
@@ -1047,9 +1342,44 @@ class BacktestRunner:
             if candles:
                 self.candle_map[symbol] = candles
                 self.time_to_index[symbol] = {c.open_time_ms: i for i, c in enumerate(candles)}
+                source_series = calculate_source_series(candles, self.config.signal_source)
+                self.ohlc4_map[symbol] = source_series
+                self.wma45_map[symbol] = calculate_wma_series(
+                    source_series,
+                    period=self.config.signal_wma_period,
+                    offset=self.config.signal_wma_offset,
+                )
+                self.atr14_map[symbol] = [calculate_atr(candles, i, period=self.config.atr_period) for i in range(len(candles))]
+                self.macd_diff_map[symbol] = calculate_macd_diff_series(
+                    source_series,
+                    fast_period=self.config.macd_fast_period,
+                    slow_period=self.config.macd_slow_period,
+                    signal_period=self.config.macd_signal_period,
+                )
+                stoch_k, stoch_d = calculate_stoch_rsi_series(
+                    source_series,
+                    rsi_period=self.config.stoch_rsi_period,
+                    k_period=self.config.stoch_rsi_k_period,
+                    d_period=self.config.stoch_rsi_d_period,
+                )
+                self.stoch_rsi_k_map[symbol] = stoch_k
+                self.stoch_rsi_d_map[symbol] = stoch_d
 
         if self.btc_symbol not in self.candle_map:
             raise RuntimeError(f"Missing BTC regime candles for {self.btc_symbol}")
+
+        btc_candles = self.candle_map[self.btc_symbol]
+        btc_series = calculate_source_series(btc_candles, self.config.btc_regime_source)
+        btc_wma90 = calculate_wma_series(
+            btc_series,
+            period=self.config.btc_regime_wma_period,
+            offset=self.config.btc_regime_wma_offset,
+        )
+        for idx, candle in enumerate(btc_candles):
+            wma = btc_wma90[idx]
+            if wma is None:
+                continue
+            self.btc_regime_by_time[candle.open_time_ms] = "BUY" if btc_series[idx] > wma else "SELL"
 
     def _update_daily_session(self, ts_ms: int) -> None:
         day = dt.datetime.fromtimestamp(ts_ms / 1000, tz=dt.timezone.utc).date()
@@ -1072,46 +1402,103 @@ class BacktestRunner:
         return self.daily_drawdown_paused or self._in_cooldown(ts_ms)
 
     def _regime_signal(self, ts_ms: int) -> Optional[str]:
-        btc = self.candle_map[self.btc_symbol]
-        idx = self.time_to_index[self.btc_symbol].get(ts_ms)
-        if idx is None:
-            return None
-        ohlc4 = calculate_ohlc4(btc)
-        wma = calculate_wma_at(ohlc4, idx, period=200, offset=0)
-        if wma is None:
-            return None
-        return "BUY" if ohlc4[idx] > wma else "SELL"
+        return self.btc_regime_by_time.get(ts_ms)
 
     def _symbol_signal(self, symbol: str, ts_ms: int) -> Optional[dict]:
         candles = self.candle_map.get(symbol)
         if not candles:
             return None
-        idx = self.time_to_index[symbol].get(ts_ms)
+        idx_map = self.time_to_index.get(symbol)
+        if idx_map is None:
+            return None
+        idx = idx_map.get(ts_ms)
         if idx is None:
             return None
-        if idx < 46:
+        min_wma_index = self.config.signal_wma_period + max(0, self.config.signal_wma_offset) - 1
+        if idx < min_wma_index:
             return None
 
-        ohlc4 = calculate_ohlc4(candles)
-        wma_series = calculate_wma_series(ohlc4, period=45, offset=2)
+        ohlc4 = self.ohlc4_map.get(symbol)
+        wma_series = self.wma45_map.get(symbol)
+        atr_series = self.atr14_map.get(symbol)
+        macd_diff_series = self.macd_diff_map.get(symbol)
+        stoch_k_series = self.stoch_rsi_k_map.get(symbol)
+        stoch_d_series = self.stoch_rsi_d_map.get(symbol)
+        if (
+            ohlc4 is None
+            or wma_series is None
+            or atr_series is None
+            or macd_diff_series is None
+            or stoch_k_series is None
+            or stoch_d_series is None
+        ):
+            return None
+
         w = wma_series[idx]
         if w is None:
             return None
 
         current = ohlc4[idx]
-        atr = calculate_atr(candles, idx, period=14)
+        atr = atr_series[idx]
         atr_ratio = (atr / current) if (atr is not None and current > 0) else 0.0
         signal_type = "BUY" if (current - w) > 0 else "SELL"
         confirmed = confirm_signal(candles, ohlc4, wma_series, idx, signal_type)
+        indicator_confirmed = self._confirm_optional_indicators(
+            signal_type=signal_type,
+            signal_index=idx,
+            macd_diff_series=macd_diff_series,
+            stoch_k_series=stoch_k_series,
+            stoch_d_series=stoch_d_series,
+        )
 
         return {
             "symbol": symbol,
             "signal": signal_type,
-            "confirmed": bool(confirmed),
+            "confirmed": bool(confirmed and indicator_confirmed),
             "current_price": current,
             "atr_ratio": atr_ratio,
             "index": idx,
         }
+
+    def _confirm_optional_indicators(
+        self,
+        *,
+        signal_type: str,
+        signal_index: int,
+        macd_diff_series: List[Optional[float]],
+        stoch_k_series: List[Optional[float]],
+        stoch_d_series: List[Optional[float]],
+    ) -> bool:
+        check_index = signal_index - 1
+        if check_index < 0:
+            return False
+
+        if self.config.require_macd_confirmation:
+            macd_diff = macd_diff_series[check_index]
+            if macd_diff is None:
+                return False
+            if signal_type == "BUY" and macd_diff <= 0:
+                return False
+            if signal_type == "SELL" and macd_diff >= 0:
+                return False
+
+        if self.config.require_stoch_rsi_confirmation:
+            stoch_k = stoch_k_series[check_index]
+            stoch_d = stoch_d_series[check_index]
+            if stoch_k is None or stoch_d is None:
+                return False
+            if signal_type == "BUY" and stoch_k <= stoch_d:
+                return False
+            if signal_type == "SELL" and stoch_k >= stoch_d:
+                return False
+            # Prevent BUY signals when Stoch RSI is in overbought zone (> 80)
+            if signal_type == "BUY" and stoch_k > 80:
+                return False
+            # Prevent SELL signals when Stoch RSI is in oversold zone (< 20)
+            if signal_type == "SELL" and stoch_k < 20:
+                return False
+
+        return True
 
     def _open_position(self, symbol: str, signal: str, fill_price: float, ts_ms: int, atr_ratio: float) -> bool:
         if symbol in self.positions:
@@ -1266,8 +1653,26 @@ class BacktestRunner:
         self.load()
 
         timeline = [c.open_time_ms for c in self.candle_map[self.btc_symbol]]
-        if len(timeline) < 260:
+        warmup_required = max(
+            self.config.signal_wma_period + max(0, self.config.signal_wma_offset) - 1,
+            self.config.btc_regime_wma_period + max(0, self.config.btc_regime_wma_offset) - 1,
+            self.config.atr_period,
+            self.config.macd_slow_period + self.config.macd_signal_period - 2,
+            self.config.stoch_rsi_period + self.config.stoch_rsi_k_period + self.config.stoch_rsi_d_period - 2,
+        )
+        if len(timeline) < warmup_required + 2:
             raise RuntimeError("Insufficient BTC candles for regime and warmup")
+
+        total_steps = len(timeline)
+        progress_stride = max(1, total_steps // 20)  # ~5% checkpoints.
+        run_start = time.time()
+        start_ts_ms = timeline[0]
+        end_ts_ms = timeline[-1]
+        print(
+            "Backtest run started: "
+            f"symbols={len(self.symbols)}, candles={total_steps}, "
+            f"window=[{start_ts_ms}, {end_ts_ms}]"
+        )
 
         pending_entries: List[dict] = []
 
@@ -1336,6 +1741,19 @@ class BacktestRunner:
                 )
 
             self._record_equity(ts_ms)
+
+            step = t_idx + 1
+            if step == 1 or step % progress_stride == 0 or step == total_steps:
+                elapsed = max(0.0, time.time() - run_start)
+                pct = (step / total_steps) * 100.0 if total_steps > 0 else 100.0
+                eta_seconds = ((elapsed / step) * (total_steps - step)) if step > 0 else 0.0
+                print(
+                    "Run progress: "
+                    f"{step}/{total_steps} ({pct:.1f}%), "
+                    f"open_positions={len(self.positions)}, "
+                    f"closed_trades={len(self.closed_trades)}, "
+                    f"elapsed={elapsed:.1f}s, eta={eta_seconds:.1f}s"
+                )
 
         final_ts = timeline[-1]
         for symbol in list(self.positions.keys()):
@@ -1497,6 +1915,7 @@ def run_backtest(args: argparse.Namespace) -> None:
         raise RuntimeError("No candles found in DB. Run backfill first.")
 
     leverage_buckets = load_leverage_buckets(Path(args.leverage_config))
+    apply_leverage_overrides(leverage_buckets, args)
     selected_buckets = parse_bucket_selection(args.buckets)
 
     if args.symbols:
@@ -1516,7 +1935,36 @@ def run_backtest(args: argparse.Namespace) -> None:
     if args.btc_symbol not in available_symbols:
         raise RuntimeError(f"BTC regime symbol {args.btc_symbol} not present in DB")
 
-    config = BacktestConfig(initial_balance=float(args.initial_balance))
+    partial_levels = tuple(normalize_percent_to_ratio(v) for v in parse_float_csv(args.partial_levels, "partial-levels"))
+    partial_sizes = tuple(normalize_percent_to_ratio(v) for v in parse_float_csv(args.partial_sizes, "partial-sizes"))
+
+    config = BacktestConfig(
+        initial_balance=float(args.initial_balance),
+        signal_source=str(args.signal_source).strip().lower(),
+        signal_wma_period=int(args.signal_wma_period),
+        signal_wma_offset=int(args.signal_wma_offset),
+        btc_regime_source=str(args.btc_regime_source).strip().lower(),
+        btc_regime_wma_period=int(args.btc_regime_wma_period),
+        btc_regime_wma_offset=int(args.btc_regime_wma_offset),
+        atr_period=int(args.atr_period),
+        atr_volatility_cutoff=max(0.0, normalize_percent_to_ratio(float(args.atr_volatility_cutoff_pct))),
+        atr_size_scalar=float(args.atr_size_scalar),
+        hard_stop_pct=abs(normalize_percent_to_ratio(float(args.hard_stop_pct))),
+        trailing_trigger_pct=max(0.0, normalize_percent_to_ratio(float(args.trailing_activation_pct))),
+        trailing_buffer_pct=max(0.0, normalize_percent_to_ratio(float(args.trailing_callback_pct))),
+        partial_levels=partial_levels,
+        partial_sizes=partial_sizes,
+        max_hold_minutes=max(1, int(float(args.time_exit_hours) * 60.0)),
+        macd_fast_period=int(args.macd_fast),
+        macd_slow_period=int(args.macd_slow),
+        macd_signal_period=int(args.macd_signal),
+        stoch_rsi_period=int(args.stoch_rsi_period),
+        stoch_rsi_k_period=int(args.stoch_rsi_k),
+        stoch_rsi_d_period=int(args.stoch_rsi_d),
+        require_macd_confirmation=bool(args.confirm_macd),
+        require_stoch_rsi_confirmation=bool(args.confirm_stoch_rsi),
+    )
+    validate_backtest_config(config)
 
     runner = BacktestRunner(
         store=store,
@@ -1537,8 +1985,24 @@ def run_backtest(args: argparse.Namespace) -> None:
         "db": str(Path(args.db).resolve()),
         "category": args.category,
         "interval": args.interval,
+        "recipe": args.recipe,
         "symbols": symbols,
         "selected_buckets": selected_buckets,
+        "leverage_buckets": {
+            "major": {
+                "leverage": leverage_buckets["major"]["leverage"],
+                "symbols": sorted(leverage_buckets["major"]["symbols"]),
+            },
+            "large_alt": {
+                "leverage": leverage_buckets["large_alt"]["leverage"],
+                "symbols": sorted(leverage_buckets["large_alt"]["symbols"]),
+            },
+            "mid_cap": {
+                "leverage": leverage_buckets["mid_cap"]["leverage"],
+                "symbols": sorted(leverage_buckets["mid_cap"]["symbols"]),
+            },
+            "default_leverage": leverage_buckets["default_leverage"],
+        },
         "btc_symbol": args.btc_symbol,
         "start_ms": args.start_ms,
         "end_ms": args.end_ms,
@@ -1566,6 +2030,7 @@ def run_backtest(args: argparse.Namespace) -> None:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    argv_tokens = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(description="Aribot historical data + backtest pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1596,6 +2061,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p_backfill.add_argument("--leverage-config", default="leverage_buckets.json", help="Leverage bucket JSON path")
 
     p_run = sub.add_parser("run", help="Run deterministic backtest from local DB")
+    p_run.add_argument("--recipe", choices=["baseline"], default="", help="Apply a preset strategy recipe")
     p_run.add_argument("--db", default="aribot_backtest.db", help="SQLite DB path")
     p_run.add_argument("--category", default="linear", help="Bybit category")
     p_run.add_argument("--interval", default=DEFAULT_INTERVAL, help="Bybit interval")
@@ -1610,10 +2076,81 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p_run.add_argument("--start-ms", type=int, default=None, help="Backtest start timestamp ms")
     p_run.add_argument("--end-ms", type=int, default=None, help="Backtest end timestamp ms")
     p_run.add_argument("--initial-balance", type=float, default=400.0, help="Initial balance")
+    p_run.add_argument(
+        "--signal-source",
+        default="ohlc4",
+        choices=["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"],
+        help="Signal source series used for strategy WMA, MACD, and Stoch RSI",
+    )
+    p_run.add_argument("--signal-wma-period", type=int, default=45, help="Signal WMA period")
+    p_run.add_argument("--signal-wma-offset", type=int, default=2, help="Signal WMA offset")
+    p_run.add_argument(
+        "--btc-regime-source",
+        default="ohlc4",
+        choices=["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"],
+        help="BTC regime source series used for regime WMA",
+    )
+    p_run.add_argument("--btc-regime-wma-period", type=int, default=90, help="BTC regime WMA period")
+    p_run.add_argument("--btc-regime-wma-offset", type=int, default=0, help="BTC regime WMA offset")
+    p_run.add_argument("--hard-stop-pct", type=float, default=2.5, help="Hard stop percent (2.5 means 2.5%%)")
+    p_run.add_argument(
+        "--partial-levels",
+        default="2,3,5",
+        help="Comma-separated partial exit levels in percent or ratio (e.g. 2,3,5 or 0.02,0.03,0.05)",
+    )
+    p_run.add_argument(
+        "--partial-sizes",
+        default="25,25,25",
+        help="Comma-separated partial exit sizes in percent or ratio (e.g. 25,25,25 or 0.25,0.25,0.25)",
+    )
+    p_run.add_argument(
+        "--trailing-activation-pct",
+        type=float,
+        default=2.0,
+        help="Trailing activation percent gain (2 means +2%%)",
+    )
+    p_run.add_argument(
+        "--trailing-callback-pct",
+        type=float,
+        default=1.5,
+        help="Trailing callback percent from peak/trough (1.5 means 1.5%%)",
+    )
+    p_run.add_argument("--time-exit-hours", type=float, default=40.0, help="Maximum hold time in hours")
+    p_run.add_argument("--atr-period", type=int, default=14, help="ATR period")
+    p_run.add_argument(
+        "--atr-volatility-cutoff-pct",
+        type=float,
+        default=5.0,
+        help="ATR/current cutoff in percent or ratio where ATR risk scalar is applied",
+    )
+    p_run.add_argument("--atr-size-scalar", type=float, default=0.5, help="Risk scalar when ATR cutoff is exceeded")
+    p_run.add_argument("--major-leverage", type=float, default=None, help="Override major bucket leverage")
+    p_run.add_argument("--large-alt-leverage", type=float, default=None, help="Override large_alt bucket leverage")
+    p_run.add_argument("--mid-cap-leverage", type=float, default=None, help="Override mid_cap bucket leverage")
+    p_run.add_argument("--default-leverage", type=float, default=None, help="Override default leverage")
+    p_run.add_argument("--macd-fast", type=int, default=2, help="MACD fast period")
+    p_run.add_argument("--macd-slow", type=int, default=39, help="MACD slow period")
+    p_run.add_argument("--macd-signal", type=int, default=6, help="MACD signal period")
+    p_run.add_argument("--stoch-rsi-period", type=int, default=14, help="Stochastic RSI base RSI period")
+    p_run.add_argument("--stoch-rsi-k", type=int, default=3, help="Stochastic RSI K smoothing period")
+    p_run.add_argument("--stoch-rsi-d", type=int, default=3, help="Stochastic RSI D smoothing period")
+    p_run.add_argument(
+        "--confirm-macd",
+        action="store_true",
+        help="Require MACD(2,39,6) diff confirmation on the prior closed OHLC4 bar",
+    )
+    p_run.add_argument(
+        "--confirm-stoch-rsi",
+        action="store_true",
+        help="Require Stochastic RSI(14,3,3) K/D confirmation on the prior closed OHLC4 bar",
+    )
     p_run.add_argument("--out-dir", default="backtest_artifacts/latest_run", help="Output directory")
     p_run.add_argument("--leverage-config", default="leverage_buckets.json", help="Leverage bucket JSON path")
 
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(argv_tokens)
+    parsed._provided_flags = collect_provided_cli_flags(argv_tokens)
+    apply_run_recipe(parsed)
+    return parsed
 
 
 def main(argv: Optional[List[str]] = None) -> int:
