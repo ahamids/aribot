@@ -1,0 +1,860 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Backtest Studio</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #142033;
+      --muted: #5e6f87;
+      --line: #dbe3ef;
+      --good: #177245;
+      --bad: #b0382f;
+      --warn: #a56500;
+      --accent: #1e5cb3;
+      --term: #0b1220;
+      --termText: #b8f5d2;
+      --gold: #b58a00;
+      --silver: #778499;
+      --bronze: #9a5b2b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1624;
+        --card: #192131;
+        --text: #e5ecf7;
+        --muted: #a7b3c8;
+        --line: #2f3b52;
+        --good: #44d68a;
+        --bad: #ff8f85;
+        --warn: #ffc766;
+        --accent: #87b5ff;
+        --term: #070b13;
+        --termText: #b8f5d2;
+        --gold: #f0c95d;
+        --silver: #c3cedd;
+        --bronze: #d78a53;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "SF Pro Text", "Noto Sans", sans-serif;
+      background: radial-gradient(1200px 600px at 0% 0%, #d8e6ff40, transparent), var(--bg);
+      color: var(--text);
+    }
+    .shell { max-width: 1400px; margin: 0 auto; padding: 18px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+    .tabBtn { border: 1px solid var(--line); background: var(--card); color: var(--text); padding: 8px 12px; border-radius: 10px; cursor: pointer; }
+    .tabBtn.active { border-color: var(--accent); color: var(--accent); }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 1050px) { .grid2 { grid-template-columns: 1fr; } }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    input, select, textarea, button {
+      font: inherit;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--text);
+      padding: 8px;
+    }
+    textarea { min-height: 90px; width: 100%; }
+    input, select { width: 100%; }
+    .btn { cursor: pointer; }
+    .btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .btn.warn { background: #c23f34; color: white; border-color: #c23f34; }
+    .muted { color: var(--muted); }
+    .terminal {
+      background: var(--term);
+      color: var(--termText);
+      font-family: Consolas, Monaco, monospace;
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 230px;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      border: 1px solid #1f2b44;
+    }
+    .metricGrid { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 10px; }
+    @media (max-width: 1100px) { .metricGrid { grid-template-columns: 1fr 1fr; } }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px; font-size: 13px; }
+    th { text-align: left; cursor: pointer; }
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .warnText { color: var(--warn); }
+    .strike { text-decoration: line-through; opacity: 0.75; }
+    .heatmap {
+      display: grid;
+      gap: 2px;
+      overflow: auto;
+      max-height: 320px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px;
+    }
+    .cellHead { font-size: 11px; color: var(--muted); padding: 6px; position: sticky; top: 0; background: var(--card); }
+    .cellLabel { font-size: 12px; padding: 6px; position: sticky; left: 0; background: var(--card); }
+    .cellValue { min-width: 70px; font-size: 11px; text-align: center; padding: 6px; border-radius: 4px; }
+    .rank1 { border-left: 5px solid var(--gold); }
+    .rank2 { border-left: 5px solid var(--silver); }
+    .rank3 { border-left: 5px solid var(--bronze); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module">
+    import React, { useEffect, useMemo, useRef, useState } from "https://esm.sh/react@18.3.1";
+    import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
+    import htm from "https://esm.sh/htm@3.1.1";
+    import {
+      ResponsiveContainer,
+      LineChart,
+      Line,
+      XAxis,
+      YAxis,
+      Tooltip,
+      ReferenceLine,
+      CartesianGrid,
+    } from "https://esm.sh/recharts@2.12.7";
+
+    const html = htm.bind(React.createElement);
+    const API = "";
+
+    const parseSymbolsText = (txt) => txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const toMs = (dt) => dt ? new Date(dt).getTime() : null;
+    const fmtPct = (v) => Number.isFinite(v) ? (v * 100).toFixed(2) + "%" : "-";
+    const fmtNum = (v) => Number.isFinite(v) ? v.toFixed(2) : "-";
+    const product = (arr) => arr.reduce((a, b) => a * Math.max(0, b), 1);
+
+    function parseList(input, asInt = false) {
+      return input
+        .split(",")
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(s => asInt ? parseInt(s, 10) : parseFloat(s))
+        .filter(v => Number.isFinite(v));
+    }
+
+    async function jget(path) {
+      const r = await fetch(API + path);
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    async function jpost(path, body) {
+      const r = await fetch(API + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    async function jdel(path) {
+      const r = await fetch(API + path, { method: "DELETE" });
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    function App() {
+      const [tab, setTab] = useState("Run");
+      const [buckets, setBuckets] = useState({ major: [], large_alt: [], mid_cap: [] });
+      const [recipes, setRecipes] = useState({});
+      const [recentRuns, setRecentRuns] = useState([]);
+      const [err, setErr] = useState("");
+
+      const [mode, setMode] = useState("backfill");
+      const [sourceMode, setSourceMode] = useState("bucket");
+      const [bucket, setBucket] = useState("major");
+      const [manualSymbols, setManualSymbols] = useState("BTCUSDT\nETHUSDT");
+
+      const [activeRunId, setActiveRunId] = useState("");
+      const [runOutputDir, setRunOutputDir] = useState("");
+      const [runStatus, setRunStatus] = useState("idle");
+      const [logLines, setLogLines] = useState([]);
+      const logRef = useRef(null);
+      const eventRef = useRef(null);
+
+      const [backfill, setBackfill] = useState({
+        db: "aribot_backtest.db",
+        start_dt: "",
+        end_dt: "",
+        interval: "1h",
+        limit: 1000,
+        sleep: 0.5,
+        max_retries: 3,
+        output_dir: "backtest_results",
+        manifest_label: "",
+      });
+
+      const [runCfg, setRunCfg] = useState({
+        db: "aribot_backtest.db",
+        output_dir: "backtest_results/latest_run",
+        signal_source: "ohlc4",
+        wma_period: 45,
+        wma_offset: 0,
+        regime_btc_symbol: "BTCUSDT",
+        regime_source: "ohlc4",
+        regime_wma_period: 45,
+        regime_wma_offset: 0,
+        hard_stop_pct: 0.03,
+        trail_activation_pct: 0.015,
+        trail_callback_pct: 0.008,
+        time_exit_hours: 48,
+        atr_period: 14,
+        atr_cutoff_pct: 0.05,
+        atr_size_scalar: 0.8,
+        major_leverage: 5,
+        large_alt_leverage: 3,
+        mid_cap_leverage: 2,
+        default_leverage: 2,
+      });
+
+      const [partials, setPartials] = useState([{ level: 0.015, size: 0.35 }, { level: 0.03, size: 0.35 }]);
+
+      const [analysisDir, setAnalysisDir] = useState("");
+      const [analysisData, setAnalysisData] = useState(null);
+      const [selectedSymbol, setSelectedSymbol] = useState("");
+      const [sortKey, setSortKey] = useState("composite_score");
+      const [sortDir, setSortDir] = useState("desc");
+
+      const [sweep, setSweep] = useState({
+        db: "aribot_backtest.db",
+        output_dir: "backtest_results/sweep_run",
+        bucket: "major",
+        wma_periods: "30,45,60",
+        hard_stop_pcts: "0.02,0.03",
+        trail_activation_pcts: "0.01,0.015",
+        trail_callback_pcts: "0.006,0.008",
+        atr_cutoff_pcts: "0.04,0.06",
+      });
+      const [sweepRunId, setSweepRunId] = useState("");
+      const [sweepStatus, setSweepStatus] = useState("idle");
+      const [sweepLogs, setSweepLogs] = useState([]);
+      const [sweepResults, setSweepResults] = useState(null);
+
+      useEffect(() => {
+        Promise.all([jget("/api/buckets"), jget("/api/recipes"), jget("/api/recent-runs")])
+          .then(([b, r, rr]) => {
+            setBuckets(b);
+            setRecipes(r.recipes || {});
+            setRecentRuns(Array.isArray(rr) ? rr : (rr.runs || []));
+          })
+          .catch(e => setErr(String(e)));
+      }, []);
+
+      useEffect(() => {
+        if (logRef.current) {
+          logRef.current.scrollTop = logRef.current.scrollHeight;
+        }
+      }, [logLines, sweepLogs]);
+
+      function startStream(runId, setter, statusSetter, doneCb) {
+        if (eventRef.current) eventRef.current.close();
+        const ev = new EventSource(`/api/stream/${runId}`);
+        eventRef.current = ev;
+        ev.onmessage = (msg) => {
+          try {
+            const data = JSON.parse(msg.data || "{}");
+            if (data.type === "log") {
+              setter((prev) => [...prev, data.line]);
+            } else if (data.type === "done") {
+              statusSetter(data.exit_code === 0 ? "completed" : "failed");
+              doneCb?.(data);
+              ev.close();
+            } else if (data.type === "error") {
+              statusSetter("failed");
+              setter((prev) => [...prev, `[error] ${data.message}`]);
+              ev.close();
+            }
+          } catch {
+            setter((prev) => [...prev, msg.data]);
+          }
+        };
+        ev.onerror = () => {
+          statusSetter((s) => s === "running" ? "failed" : s);
+          ev.close();
+        };
+      }
+
+      function symbolsPayload() {
+        if (sourceMode === "bucket") return { bucket };
+        return { symbols: parseSymbolsText(manualSymbols) };
+      }
+
+      const partialSum = useMemo(() => partials.reduce((a, b) => a + (Number(b.size) || 0), 0), [partials]);
+      const partialValid = partials.every(p => Number.isFinite(Number(p.level)) && Number.isFinite(Number(p.size))) && partialSum <= 1.0;
+
+      const sweepLens = useMemo(() => [
+        parseList(sweep.wma_periods, true).length,
+        parseList(sweep.hard_stop_pcts).length,
+        parseList(sweep.trail_activation_pcts).length,
+        parseList(sweep.trail_callback_pcts).length,
+        parseList(sweep.atr_cutoff_pcts).length,
+      ], [sweep]);
+      const sweepCombos = useMemo(() => product(sweepLens), [sweepLens]);
+
+      async function saveRecipe() {
+        const name = window.prompt("Recipe name");
+        if (!name) return;
+        const config = { ...runCfg, sourceMode, bucket, manualSymbols, partials };
+        await jpost("/api/recipes", { name, config });
+        const fresh = await jget("/api/recipes");
+        setRecipes(fresh.recipes || {});
+      }
+
+      function loadRecipe(name) {
+        const cfg = recipes[name];
+        if (!cfg) return;
+        setRunCfg((prev) => ({ ...prev, ...cfg }));
+        if (cfg.sourceMode) setSourceMode(cfg.sourceMode);
+        if (cfg.bucket) setBucket(cfg.bucket);
+        if (cfg.manualSymbols) setManualSymbols(cfg.manualSymbols);
+        if (Array.isArray(cfg.partials)) setPartials(cfg.partials);
+      }
+
+      async function startBackfill() {
+        try {
+          setErr("");
+          setRunStatus("running");
+          setLogLines([]);
+          const payload = {
+            db: backfill.db,
+            ...symbolsPayload(),
+            start_ms: toMs(backfill.start_dt),
+            end_ms: toMs(backfill.end_dt),
+            interval: backfill.interval,
+            limit: Number(backfill.limit),
+            sleep: Number(backfill.sleep),
+            max_retries: Number(backfill.max_retries),
+            output_dir: backfill.output_dir,
+            manifest_label: backfill.manifest_label || null,
+          };
+          const rsp = await jpost("/api/backfill/start", payload);
+          setActiveRunId(rsp.run_id);
+          setRunOutputDir(backfill.output_dir);
+          startStream(rsp.run_id, setLogLines, setRunStatus, (d) => setRunOutputDir(d.output_dir || backfill.output_dir));
+        } catch (e) {
+          setRunStatus("failed");
+          setErr(String(e));
+        }
+      }
+
+      async function startRun() {
+        try {
+          if (!partialValid) {
+            setErr("Partial sizes must sum to <= 1.0 and rows must be valid numbers.");
+            return;
+          }
+          setErr("");
+          setRunStatus("running");
+          setLogLines([]);
+          const payload = {
+            db: runCfg.db,
+            ...symbolsPayload(),
+            output_dir: runCfg.output_dir,
+            signal_source: runCfg.signal_source,
+            wma_period: Number(runCfg.wma_period),
+            wma_offset: Number(runCfg.wma_offset),
+            regime_btc_symbol: runCfg.regime_btc_symbol,
+            regime_source: runCfg.regime_source,
+            regime_wma_period: Number(runCfg.regime_wma_period),
+            regime_wma_offset: Number(runCfg.regime_wma_offset),
+            hard_stop_pct: Number(runCfg.hard_stop_pct),
+            trail_activation_pct: Number(runCfg.trail_activation_pct),
+            trail_callback_pct: Number(runCfg.trail_callback_pct),
+            partial_levels: partials.map(p => Number(p.level)),
+            partial_sizes: partials.map(p => Number(p.size)),
+            time_exit_hours: Number(runCfg.time_exit_hours),
+            atr_period: Number(runCfg.atr_period),
+            atr_cutoff_pct: Number(runCfg.atr_cutoff_pct),
+            atr_size_scalar: Number(runCfg.atr_size_scalar),
+            major_leverage: Number(runCfg.major_leverage),
+            large_alt_leverage: Number(runCfg.large_alt_leverage),
+            mid_cap_leverage: Number(runCfg.mid_cap_leverage),
+            default_leverage: Number(runCfg.default_leverage),
+          };
+          const rsp = await jpost("/api/run/start", payload);
+          setActiveRunId(rsp.run_id);
+          setRunOutputDir(runCfg.output_dir);
+          startStream(rsp.run_id, setLogLines, setRunStatus, (d) => setRunOutputDir(d.output_dir || runCfg.output_dir));
+        } catch (e) {
+          setRunStatus("failed");
+          setErr(String(e));
+        }
+      }
+
+      async function cancelActiveRun() {
+        if (!activeRunId) return;
+        await jpost(`/api/run/${activeRunId}/cancel`, {});
+      }
+
+      async function loadAnalysis(path = analysisDir) {
+        try {
+          setErr("");
+          const data = await jget(`/api/results?dir=${encodeURIComponent(path)}`);
+          setAnalysisData(data);
+          setAnalysisDir(path);
+          const summaryRows = Array.isArray(data.summary) ? data.summary : [];
+          setSelectedSymbol(summaryRows[0]?.symbol || "");
+        } catch (e) {
+          setAnalysisData(null);
+          setErr(String(e));
+        }
+      }
+
+      function viewResults() {
+        setTab("Analysis");
+        setAnalysisDir(runOutputDir);
+        loadAnalysis(runOutputDir);
+      }
+
+      async function startSweep() {
+        try {
+          setErr("");
+          setSweepStatus("running");
+          setSweepLogs([]);
+          const payload = {
+            db: sweep.db,
+            output_dir: sweep.output_dir,
+            bucket: sweep.bucket,
+            wma_periods: parseList(sweep.wma_periods, true),
+            hard_stop_pcts: parseList(sweep.hard_stop_pcts),
+            trail_activation_pcts: parseList(sweep.trail_activation_pcts),
+            trail_callback_pcts: parseList(sweep.trail_callback_pcts),
+            atr_cutoff_pcts: parseList(sweep.atr_cutoff_pcts),
+          };
+          const rsp = await jpost("/api/sweep/start", payload);
+          setSweepRunId(rsp.run_id);
+          startStream(rsp.run_id, setSweepLogs, setSweepStatus, () => {});
+        } catch (e) {
+          setSweepStatus("failed");
+          setErr(String(e));
+        }
+      }
+
+      async function loadSweepResults() {
+        try {
+          const data = await jget(`/api/sweep-results?dir=${encodeURIComponent(sweep.output_dir)}`);
+          setSweepResults(data);
+        } catch (e) {
+          setErr(String(e));
+        }
+      }
+
+      const summaryRows = useMemo(() => {
+        const arr = Array.isArray(analysisData?.summary) ? [...analysisData.summary] : [];
+        arr.sort((a, b) => {
+          const av = Number(a?.[sortKey] ?? 0);
+          const bv = Number(b?.[sortKey] ?? 0);
+          return sortDir === "asc" ? av - bv : bv - av;
+        });
+        return arr;
+      }, [analysisData, sortKey, sortDir]);
+
+      const selectedSide = useMemo(() => {
+        const sb = analysisData?.side_breakdown || {};
+        return sb[selectedSymbol] || { long: {}, short: {} };
+      }, [analysisData, selectedSymbol]);
+
+      const seasons = useMemo(() => {
+        const sb = analysisData?.season_breakdown || {};
+        const set = new Set();
+        Object.values(sb).forEach((perSymbol) => {
+          if (perSymbol && typeof perSymbol === "object") {
+            Object.keys(perSymbol).forEach((k) => set.add(k));
+          }
+        });
+        return [...set].sort();
+      }, [analysisData]);
+
+      function heatColor(v) {
+        const n = Number(v || 0);
+        if (!Number.isFinite(n)) return "rgba(120,120,120,0.25)";
+        const cap = Math.min(1, Math.abs(n) / 20);
+        if (n > 0) return `rgba(40, 180, 99, ${0.2 + 0.7 * cap})`;
+        if (n < 0) return `rgba(220, 76, 70, ${0.2 + 0.7 * cap})`;
+        return "rgba(125,125,125,0.2)";
+      }
+
+      const rankedSweep = useMemo(() => {
+        const arr = Array.isArray(sweepResults?.sweep_results) ? [...sweepResults.sweep_results] : [];
+        arr.sort((a, b) => Number(b.composite_score || 0) - Number(a.composite_score || 0));
+        return arr;
+      }, [sweepResults]);
+
+      return html`
+        <div className="shell">
+          <h2>Backtest Studio</h2>
+          <div className="tabs">
+            ${["Run", "Analysis", "Sweep"].map(name => html`<button className=${`tabBtn ${tab === name ? "active" : ""}`} onClick=${() => setTab(name)}>${name}</button>`)}
+          </div>
+
+          ${err ? html`<div className="card"><span className="bad">${err}</span></div>` : null}
+
+          ${tab === "Run" ? html`
+            <div className="card" style=${{ marginBottom: "10px" }}>
+              <div className="row" style=${{ justifyContent: "space-between" }}>
+                <div>
+                  <label>Subcommand</label>
+                  <select value=${mode} onChange=${(e) => setMode(e.target.value)}>
+                    <option value="backfill">Backfill</option>
+                    <option value="run">Run</option>
+                  </select>
+                </div>
+                <div style=${{ minWidth: "280px" }}>
+                  <label>Load recipe</label>
+                  <select onChange=${(e) => loadRecipe(e.target.value)}>
+                    <option value="">Choose recipe</option>
+                    ${Object.keys(recipes).map(k => html`<option value=${k}>${k}</option>`)}
+                  </select>
+                </div>
+                <div className="row" style=${{ alignItems: "end" }}>
+                  <button className="btn" onClick=${saveRecipe}>Save as recipe</button>
+                </div>
+              </div>
+            </div>
+
+            ${mode === "backfill" ? html`
+              <div className="card">
+                <h4>Backfill</h4>
+                <div className="grid2">
+                  <div><label>DB path</label><input value=${backfill.db} onInput=${(e) => setBackfill({ ...backfill, db: e.target.value })} /></div>
+                  <div><label>Output directory</label><input value=${backfill.output_dir} onInput=${(e) => setBackfill({ ...backfill, output_dir: e.target.value })} /></div>
+                  <div><label>Start</label><input type="datetime-local" value=${backfill.start_dt} onInput=${(e) => setBackfill({ ...backfill, start_dt: e.target.value })} /></div>
+                  <div><label>End</label><input type="datetime-local" value=${backfill.end_dt} onInput=${(e) => setBackfill({ ...backfill, end_dt: e.target.value })} /></div>
+                  <div><label>Interval</label><select value=${backfill.interval} onChange=${(e) => setBackfill({ ...backfill, interval: e.target.value })}><option>1h</option><option>4h</option><option>1d</option></select></div>
+                  <div><label>Candles per request</label><input type="number" value=${backfill.limit} onInput=${(e) => setBackfill({ ...backfill, limit: e.target.value })} /></div>
+                  <div><label>Sleep between calls</label><input type="number" step="0.1" value=${backfill.sleep} onInput=${(e) => setBackfill({ ...backfill, sleep: e.target.value })} /></div>
+                  <div><label>Max retries</label><input type="number" value=${backfill.max_retries} onInput=${(e) => setBackfill({ ...backfill, max_retries: e.target.value })} /></div>
+                  <div><label>Manifest label (optional)</label><input value=${backfill.manifest_label} onInput=${(e) => setBackfill({ ...backfill, manifest_label: e.target.value })} /></div>
+                </div>
+                <div className="card" style=${{ marginTop: "10px" }}>
+                  <label>Symbol source</label>
+                  <div className="row">
+                    <label><input type="radio" checked=${sourceMode === "bucket"} onChange=${() => setSourceMode("bucket")} /> Bucket</label>
+                    <label><input type="radio" checked=${sourceMode === "manual"} onChange=${() => setSourceMode("manual")} /> Manual list</label>
+                  </div>
+                  ${sourceMode === "bucket" ? html`
+                    <div>
+                      <select value=${bucket} onChange=${(e) => setBucket(e.target.value)}>
+                        <option value="major">major (${buckets.major?.length || 0})</option>
+                        <option value="large_alt">large_alt (${buckets.large_alt?.length || 0})</option>
+                        <option value="mid_cap">mid_cap (${buckets.mid_cap?.length || 0})</option>
+                      </select>
+                    </div>
+                  ` : html`<textarea value=${manualSymbols} onInput=${(e) => setManualSymbols(e.target.value)}></textarea>`}
+                </div>
+                <div style=${{ marginTop: "10px" }}><button className="btn primary" onClick=${startBackfill}>Start Backfill</button></div>
+              </div>
+            ` : html`
+              <div className="card">
+                <h4>Run</h4>
+                <div className="grid2">
+                  <div className="card">
+                    <h5>Signal</h5>
+                    <label>Source</label><select value=${runCfg.signal_source} onChange=${(e) => setRunCfg({ ...runCfg, signal_source: e.target.value })}><option>ohlc4</option><option>close</option><option>hl2</option></select>
+                    <label>WMA period</label><input type="number" value=${runCfg.wma_period} onInput=${(e) => setRunCfg({ ...runCfg, wma_period: e.target.value })} />
+                    <label>WMA offset</label><input type="number" value=${runCfg.wma_offset} onInput=${(e) => setRunCfg({ ...runCfg, wma_offset: e.target.value })} />
+                  </div>
+                  <div className="card">
+                    <h5>Regime</h5>
+                    <label>BTC symbol</label><input value=${runCfg.regime_btc_symbol} onInput=${(e) => setRunCfg({ ...runCfg, regime_btc_symbol: e.target.value })} />
+                    <label>Source</label><select value=${runCfg.regime_source} onChange=${(e) => setRunCfg({ ...runCfg, regime_source: e.target.value })}><option>ohlc4</option><option>close</option><option>hl2</option></select>
+                    <label>WMA period</label><input type="number" value=${runCfg.regime_wma_period} onInput=${(e) => setRunCfg({ ...runCfg, regime_wma_period: e.target.value })} />
+                    <label>WMA offset</label><input type="number" value=${runCfg.regime_wma_offset} onInput=${(e) => setRunCfg({ ...runCfg, regime_wma_offset: e.target.value })} />
+                  </div>
+                  <div className="card">
+                    <h5>Stops</h5>
+                    <label>Hard stop %</label><input type="number" step="0.001" value=${runCfg.hard_stop_pct} onInput=${(e) => setRunCfg({ ...runCfg, hard_stop_pct: e.target.value })} />
+                    <label>Trail activation %</label><input type="number" step="0.001" value=${runCfg.trail_activation_pct} onInput=${(e) => setRunCfg({ ...runCfg, trail_activation_pct: e.target.value })} />
+                    <label>Trail callback %</label><input type="number" step="0.001" value=${runCfg.trail_callback_pct} onInput=${(e) => setRunCfg({ ...runCfg, trail_callback_pct: e.target.value })} />
+                  </div>
+                  <div className="card">
+                    <h5>Partial exits</h5>
+                    ${partials.map((p, i) => html`
+                      <div className="row">
+                        <div><label>Level</label><input type="number" step="0.001" value=${p.level} onInput=${(e) => setPartials(partials.map((x, idx) => idx === i ? { ...x, level: e.target.value } : x))} /></div>
+                        <div><label>Size</label><input type="number" step="0.001" value=${p.size} onInput=${(e) => setPartials(partials.map((x, idx) => idx === i ? { ...x, size: e.target.value } : x))} /></div>
+                        <div style=${{ alignSelf: "end" }}><button className="btn" onClick=${() => setPartials(partials.filter((_, idx) => idx !== i))}>Remove</button></div>
+                      </div>
+                    `)}
+                    <button className="btn" onClick=${() => setPartials([...partials, { level: 0, size: 0 }])}>Add level</button>
+                    <div className=${partialValid ? "good" : "bad"}>Size sum: ${partialSum.toFixed(3)} (must be <= 1.0)</div>
+                  </div>
+                  <div className="card">
+                    <h5>Timing</h5>
+                    <label>Time exit hours</label><input type="number" value=${runCfg.time_exit_hours} onInput=${(e) => setRunCfg({ ...runCfg, time_exit_hours: e.target.value })} />
+                  </div>
+                  <div className="card">
+                    <h5>ATR</h5>
+                    <label>Period</label><input type="number" value=${runCfg.atr_period} onInput=${(e) => setRunCfg({ ...runCfg, atr_period: e.target.value })} />
+                    <label>Cutoff %</label><input type="number" step="0.001" value=${runCfg.atr_cutoff_pct} onInput=${(e) => setRunCfg({ ...runCfg, atr_cutoff_pct: e.target.value })} />
+                    <label>Size scalar</label><input type="number" step="0.01" value=${runCfg.atr_size_scalar} onInput=${(e) => setRunCfg({ ...runCfg, atr_size_scalar: e.target.value })} />
+                  </div>
+                  <div className="card">
+                    <h5>Leverage</h5>
+                    <label>Major</label><input type="number" value=${runCfg.major_leverage} onInput=${(e) => setRunCfg({ ...runCfg, major_leverage: e.target.value })} />
+                    <label>Large alt</label><input type="number" value=${runCfg.large_alt_leverage} onInput=${(e) => setRunCfg({ ...runCfg, large_alt_leverage: e.target.value })} />
+                    <label>Mid cap</label><input type="number" value=${runCfg.mid_cap_leverage} onInput=${(e) => setRunCfg({ ...runCfg, mid_cap_leverage: e.target.value })} />
+                    <label>Default</label><input type="number" value=${runCfg.default_leverage} onInput=${(e) => setRunCfg({ ...runCfg, default_leverage: e.target.value })} />
+                  </div>
+                  <div className="card">
+                    <h5>Symbols</h5>
+                    <div className="row">
+                      <label><input type="radio" checked=${sourceMode === "bucket"} onChange=${() => setSourceMode("bucket")} /> Bucket</label>
+                      <label><input type="radio" checked=${sourceMode === "manual"} onChange=${() => setSourceMode("manual")} /> Manual list</label>
+                    </div>
+                    ${sourceMode === "bucket" ? html`
+                      <select value=${bucket} onChange=${(e) => setBucket(e.target.value)}>
+                        <option value="major">major (${buckets.major?.length || 0})</option>
+                        <option value="large_alt">large_alt (${buckets.large_alt?.length || 0})</option>
+                        <option value="mid_cap">mid_cap (${buckets.mid_cap?.length || 0})</option>
+                      </select>
+                    ` : html`<textarea value=${manualSymbols} onInput=${(e) => setManualSymbols(e.target.value)}></textarea>`}
+                  </div>
+                  <div className="card">
+                    <h5>Output</h5>
+                    <label>DB path</label><input value=${runCfg.db} onInput=${(e) => setRunCfg({ ...runCfg, db: e.target.value })} />
+                    <label>Output directory</label><input value=${runCfg.output_dir} onInput=${(e) => setRunCfg({ ...runCfg, output_dir: e.target.value })} />
+                  </div>
+                </div>
+                <div style=${{ marginTop: "10px" }}><button className="btn primary" onClick=${startRun}>Start Run</button></div>
+              </div>
+            `}
+
+            ${(runStatus !== "idle") ? html`
+              <div className="card" style=${{ marginTop: "10px" }}>
+                <div className="row" style=${{ justifyContent: "space-between" }}>
+                  <div>Status: <strong>${runStatus === "running" ? "Running..." : runStatus === "completed" ? "Completed" : "Failed"}</strong></div>
+                  <div className="row">
+                    ${runStatus === "running" ? html`<button className="btn warn" onClick=${cancelActiveRun}>Cancel</button>` : null}
+                    ${runStatus === "completed" ? html`<button className="btn" onClick=${viewResults}>View Results</button>` : null}
+                  </div>
+                </div>
+                <div ref=${logRef} className="terminal">${logLines.join("\n") || "(waiting for logs...)"}</div>
+              </div>
+            ` : null}
+          ` : null}
+
+          ${tab === "Analysis" ? html`
+            <div className="card">
+              <div className="row">
+                <div style=${{ flex: 1 }}><label>Output directory</label><input value=${analysisDir} onInput=${(e) => setAnalysisDir(e.target.value)} /></div>
+                <div style=${{ minWidth: "320px" }}>
+                  <label>Recent runs</label>
+                  <select onChange=${(e) => setAnalysisDir(e.target.value)}>
+                    <option value="">Choose recent run</option>
+                    ${recentRuns.map(r => html`<option value=${r.dir_path}>${r.dir_name} | ${r.run_date}</option>`)}
+                  </select>
+                </div>
+                <div style=${{ alignSelf: "end" }}><button className="btn primary" onClick=${() => loadAnalysis()}>Load</button></div>
+              </div>
+            </div>
+
+            ${analysisData ? html`
+              <div className="card" style=${{ marginTop: "10px" }}>
+                <div className="metricGrid">
+                  ${(() => {
+                    const eq = Array.isArray(analysisData.equity_curve) ? analysisData.equity_curve : [];
+                    const first = Number(eq[0]?.balance || 0);
+                    const last = Number(eq[eq.length - 1]?.balance || 0);
+                    const ret = first ? ((last - first) / first) : 0;
+                    const dd = Number((analysisData.run_config || {}).max_drawdown_pct || 0);
+                    const trades = Array.isArray(analysisData.trades) ? analysisData.trades.length : 0;
+                    const wins = (analysisData.trades || []).filter(t => Number(t.pnl || 0) > 0).length;
+                    const wr = trades ? wins / trades : 0;
+                    return html`
+                      <div className="card"><div className="muted">Final balance</div><strong>${fmtNum(last)}</strong></div>
+                      <div className="card"><div className="muted">Total return %</div><strong className=${ret >= 0 ? "good" : "bad"}>${fmtPct(ret)}</strong></div>
+                      <div className="card"><div className="muted">Max drawdown %</div><strong className=${dd > 0.05 ? "bad" : ""}>${fmtPct(dd)}</strong></div>
+                      <div className="card"><div className="muted">Trade count</div><strong>${trades}</strong></div>
+                      <div className="card"><div className="muted">Win rate %</div><strong>${fmtPct(wr)}</strong></div>
+                    `;
+                  })()}
+                </div>
+              </div>
+
+              <div className="card" style=${{ marginTop: "10px", height: "290px" }}>
+                <h4>Equity Curve</h4>
+                <div style=${{ width: "100%", height: "240px" }}>
+                  <${ResponsiveContainer}>
+                    <${LineChart} data=${analysisData.equity_curve || []}>
+                      <${CartesianGrid} strokeDasharray="3 3" />
+                      <${XAxis} dataKey="timestamp" hide=${true} />
+                      <${YAxis} />
+                      <${Tooltip} />
+                      <${ReferenceLine} y=${Number((analysisData.equity_curve || [])[0]?.balance || 0)} stroke="#888" strokeDasharray="6 6" />
+                      <${Line} type="monotone" dataKey="balance" stroke="#2c7be5" dot=${false} />
+                    <//>
+                  <//>
+                </div>
+              </div>
+
+              <div className="card" style=${{ marginTop: "10px" }}>
+                <h4>Per-symbol Breakdown</h4>
+                <table>
+                  <thead>
+                    <tr>
+                      ${[
+                        ["symbol", "Symbol"], ["total_pnl", "Total PnL"], ["win_rate", "Win Rate"], ["profit_factor", "Profit Factor"], ["trail_stop_ratio", "Trail/Stop"], ["seasons_present", "Seasons"], ["composite_score", "Score"]
+                      ].map(([k, t]) => html`<th onClick=${() => { setSortKey(k); setSortDir(sortDir === "asc" ? "desc" : "asc"); }}>${t}</th>`)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${summaryRows.map((r) => html`
+                      <tr onClick=${() => setSelectedSymbol(r.symbol)} style=${{ cursor: "pointer" }} className=${r.excluded ? "strike" : ""}>
+                        <td>${r.symbol}</td>
+                        <td className=${Number(r.total_pnl || 0) >= 0 ? "good" : "bad"}>${fmtNum(Number(r.total_pnl || 0))}</td>
+                        <td>${fmtPct(Number(r.win_rate || 0))}</td>
+                        <td>${fmtNum(Number(r.profit_factor || 0))}</td>
+                        <td>${fmtNum(Number(r.trail_stop_ratio || 0))}</td>
+                        <td>${r.seasons_present || 0}</td>
+                        <td>${fmtNum(Number(r.composite_score || 0))}</td>
+                      </tr>
+                    `)}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="grid2" style=${{ marginTop: "10px" }}>
+                <div className="card">
+                  <h4>Side Breakdown (${selectedSymbol || "-"})</h4>
+                  <div className="row">
+                    <div className="card" style=${{ flex: 1 }}>
+                      <div className="muted">Long</div>
+                      <div>Trades: ${selectedSide.long?.trades ?? 0}</div>
+                      <div>PnL: <span className=${Number(selectedSide.long?.pnl || 0) >= 0 ? "good" : "bad"}>${fmtNum(Number(selectedSide.long?.pnl || 0))}</span></div>
+                      <div>Win: ${fmtPct(Number(selectedSide.long?.win_rate || 0))}</div>
+                      <div>Avg: ${fmtNum(Number(selectedSide.long?.avg_trade_pnl || 0))}</div>
+                    </div>
+                    <div className="card" style=${{ flex: 1 }}>
+                      <div className="muted">Short</div>
+                      <div>Trades: ${selectedSide.short?.trades ?? 0}</div>
+                      <div>PnL: <span className=${Number(selectedSide.short?.pnl || 0) >= 0 ? "good" : "bad"}>${fmtNum(Number(selectedSide.short?.pnl || 0))}</span></div>
+                      <div>Win: ${fmtPct(Number(selectedSide.short?.win_rate || 0))}</div>
+                      <div>Avg: ${fmtNum(Number(selectedSide.short?.avg_trade_pnl || 0))}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <h4>Exclude List</h4>
+                  <table>
+                    <thead><tr><th>Symbol</th><th>Reason</th></tr></thead>
+                    <tbody>
+                      ${(analysisData.exclude_list || []).map((x) => html`<tr><td>${typeof x === "string" ? x : (x.symbol || "-")}</td><td>${typeof x === "string" ? "-" : (x.reason || "-")}</td></tr>`)}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="card" style=${{ marginTop: "10px" }}>
+                <h4>Season Heatmap</h4>
+                ${seasons.length === 0 ? html`<div className="muted">No season data.</div>` : html`
+                  <div className="heatmap" style=${{ gridTemplateColumns: `200px repeat(${seasons.length}, minmax(75px, 1fr))` }}>
+                    <div className="cellHead">Symbol</div>
+                    ${seasons.map(s => html`<div className="cellHead">${s}</div>`)}
+                    ${Object.entries(analysisData.season_breakdown || {}).map(([sym, vals]) => html`
+                      <div className="cellLabel">${sym}</div>
+                      ${seasons.map(season => {
+                        const info = vals?.[season] || {};
+                        const pnl = Number(info.pnl || 0);
+                        return html`<div className="cellValue" title=${`${sym} ${season} pnl=${pnl} trades=${info.trades || 0} win=${info.win_rate || 0}`} style=${{ background: heatColor(pnl) }}>${fmtNum(pnl)}</div>`;
+                      })}
+                    `)}
+                  </div>
+                `}
+              </div>
+            ` : html`<div className="card" style=${{ marginTop: "10px" }}><span className="muted">No results loaded yet.</span></div>`}
+          ` : null}
+
+          ${tab === "Sweep" ? html`
+            <div className="card">
+              <h4>Sweep</h4>
+              <div className="grid2">
+                <div><label>DB path</label><input value=${sweep.db} onInput=${(e) => setSweep({ ...sweep, db: e.target.value })} /></div>
+                <div><label>Output directory</label><input value=${sweep.output_dir} onInput=${(e) => setSweep({ ...sweep, output_dir: e.target.value })} /></div>
+                <div><label>Bucket</label><select value=${sweep.bucket} onChange=${(e) => setSweep({ ...sweep, bucket: e.target.value })}><option>major</option><option>large_alt</option><option>mid_cap</option></select></div>
+                <div><label>WMA periods</label><input value=${sweep.wma_periods} onInput=${(e) => setSweep({ ...sweep, wma_periods: e.target.value })} /></div>
+                <div><label>Hard stop % values</label><input value=${sweep.hard_stop_pcts} onInput=${(e) => setSweep({ ...sweep, hard_stop_pcts: e.target.value })} /></div>
+                <div><label>Trail activation % values</label><input value=${sweep.trail_activation_pcts} onInput=${(e) => setSweep({ ...sweep, trail_activation_pcts: e.target.value })} /></div>
+                <div><label>Trail callback % values</label><input value=${sweep.trail_callback_pcts} onInput=${(e) => setSweep({ ...sweep, trail_callback_pcts: e.target.value })} /></div>
+                <div><label>ATR cutoff % values</label><input value=${sweep.atr_cutoff_pcts} onInput=${(e) => setSweep({ ...sweep, atr_cutoff_pcts: e.target.value })} /></div>
+              </div>
+              <div className=${sweepCombos > 500 ? "warnText" : "muted"} style=${{ marginTop: "8px" }}>
+                ${sweepCombos} combinations ${sweepCombos > 500 ? "- Too many permutations; reduce ranges" : ""}
+              </div>
+              <div style=${{ marginTop: "10px" }}>
+                <button className="btn primary" disabled=${sweepCombos > 500} onClick=${startSweep}>Start Sweep</button>
+                ${sweepStatus === "completed" ? html`<button className="btn" style=${{ marginLeft: "8px" }} onClick=${loadSweepResults}>Load sweep results</button>` : null}
+              </div>
+            </div>
+
+            ${(sweepStatus !== "idle") ? html`
+              <div className="card" style=${{ marginTop: "10px" }}>
+                <div>Status: <strong>${sweepStatus === "running" ? "Running..." : sweepStatus === "completed" ? "Completed" : "Failed"}</strong></div>
+                <div ref=${logRef} className="terminal">${sweepLogs.join("\n") || "(waiting for logs...)"}</div>
+              </div>
+            ` : null}
+
+            ${sweepResults ? html`
+              <div className="card" style=${{ marginTop: "10px" }}>
+                <h4>Ranked Sweep Results</h4>
+                <table>
+                  <thead>
+                    <tr><th>Rank</th><th>WMA</th><th>Hard stop</th><th>Trail act</th><th>Trail cb</th><th>ATR cut</th><th>PnL%</th><th>Drawdown</th><th>Win rate</th><th>Trades</th><th>Score</th></tr>
+                  </thead>
+                  <tbody>
+                    ${rankedSweep.map((r, idx) => html`
+                      <tr className=${idx === 0 ? "rank1" : idx === 1 ? "rank2" : idx === 2 ? "rank3" : ""}>
+                        <td>${idx + 1}</td>
+                        <td>${r.wma_period}</td>
+                        <td>${r.hard_stop_pct}</td>
+                        <td>${r.trail_activation_pct}</td>
+                        <td>${r.trail_callback_pct}</td>
+                        <td>${r.atr_cutoff_pct}</td>
+                        <td className=${Number(r.total_pnl_pct || 0) >= 0 ? "good" : "bad"}>${fmtNum(Number(r.total_pnl_pct || 0))}</td>
+                        <td>${fmtNum(Number(r.max_drawdown_pct || 0))}</td>
+                        <td>${fmtNum(Number(r.win_rate || 0))}</td>
+                        <td>${r.total_trades || 0}</td>
+                        <td>${fmtNum(Number(r.composite_score || 0))}</td>
+                      </tr>
+                    `)}
+                  </tbody>
+                </table>
+              </div>
+              <div className="card" style=${{ marginTop: "10px" }}>
+                <h4>Best Per Symbol</h4>
+                <table>
+                  <thead><tr><th>Symbol</th><th>Best recipe</th><th>PnL</th><th>Win rate</th></tr></thead>
+                  <tbody>
+                    ${Object.entries(sweepResults.best_per_symbol || {}).map(([sym, row]) => html`
+                      <tr>
+                        <td>${sym}</td>
+                        <td>${row.best_recipe_id || "-"}</td>
+                        <td className=${Number(row.pnl || 0) >= 0 ? "good" : "bad"}>${fmtNum(Number(row.pnl || 0))}</td>
+                        <td>${fmtNum(Number(row.win_rate || 0))}</td>
+                      </tr>
+                    `)}
+                  </tbody>
+                </table>
+              </div>
+            ` : html`<div className="card" style=${{ marginTop: "10px" }}><span className="muted">No sweep results loaded yet.</span></div>`}
+          ` : null}
+        </div>
+      `;
+    }
+
+    createRoot(document.getElementById("app")).render(html`<${App} />`);
+  </script>
+</body>
+</html>
