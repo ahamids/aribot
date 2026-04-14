@@ -11,6 +11,7 @@ import time
 import datetime
 import logging
 import json
+import math
 import os
 import sys
 import uuid
@@ -62,6 +63,39 @@ def _coerce_setting(settings, key, default, cast):
         return default
 
 
+def _coerce_float_tuple(value, default):
+    if value is None:
+        return tuple(default)
+
+    if isinstance(value, (list, tuple)):
+        try:
+            return tuple(float(x) for x in value)
+        except (TypeError, ValueError):
+            return tuple(default)
+
+    if isinstance(value, str):
+        items = [x.strip() for x in value.split(',') if x.strip()]
+        if not items:
+            return tuple(default)
+        try:
+            return tuple(float(x) for x in items)
+        except ValueError:
+            return tuple(default)
+
+    try:
+        return (float(value),)
+    except (TypeError, ValueError):
+        return tuple(default)
+
+
+def _normalize_ratio(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed / 100.0 if abs(parsed) > 1.0 else parsed
+
+
 class Aribot:
     def __init__(self, startup_secrets=None, emoji_mode='noemojis', bot_settings=None):
         bot_settings = bot_settings or {}
@@ -109,8 +143,37 @@ class Aribot:
         self.max_tick_age_seconds = _coerce_setting(bot_settings, 'max_tick_age_seconds', 600, int)
         self.min_24h_volume_quote = _coerce_setting(bot_settings, 'min_24h_volume_quote', 5_000_000, float)
         self.entry_risk_pct = _coerce_setting(bot_settings, 'entry_risk_pct', 0.11, float)
+        self.signal_source = str(bot_settings.get('signal_source', 'ohlc4')).strip().lower() or 'ohlc4'
+        self.signal_wma_period = _coerce_setting(bot_settings, 'signal_wma_period', 45, int)
+        self.signal_wma_offset = _coerce_setting(bot_settings, 'signal_wma_offset', 2, int)
+        self.btc_regime_source = str(bot_settings.get('btc_regime_source', 'ohlc4')).strip().lower() or 'ohlc4'
+        self.btc_regime_wma_period = _coerce_setting(bot_settings, 'btc_regime_wma_period', 90, int)
+        self.btc_regime_wma_offset = _coerce_setting(bot_settings, 'btc_regime_wma_offset', 0, int)
+        self.atr_period = _coerce_setting(bot_settings, 'atr_period', 14, int)
         self.atr_volatility_cutoff = _coerce_setting(bot_settings, 'atr_volatility_cutoff', 0.05, float)
+        self.atr_volatility_cutoff = _normalize_ratio(self.atr_volatility_cutoff) or 0.05
         self.atr_size_scalar = _coerce_setting(bot_settings, 'atr_size_scalar', 0.5, float)
+        self.hard_stop_pct = abs(_coerce_setting(bot_settings, 'hard_stop_pct', 0.025, float))
+        self.trailing_trigger_pct = abs(_coerce_setting(bot_settings, 'trailing_trigger_pct', 0.02, float))
+        self.trailing_buffer_pct = abs(_coerce_setting(bot_settings, 'trailing_buffer_pct', 0.015, float))
+        self.hard_stop_pct = abs(_normalize_ratio(self.hard_stop_pct) or 0.025)
+        self.trailing_trigger_pct = abs(_normalize_ratio(self.trailing_trigger_pct) or 0.02)
+        self.trailing_buffer_pct = abs(_normalize_ratio(self.trailing_buffer_pct) or 0.015)
+        self.partial_levels = _coerce_float_tuple(bot_settings.get('partial_levels'), (0.02, 0.03, 0.05))
+        self.partial_sizes = _coerce_float_tuple(bot_settings.get('partial_sizes'), (0.25, 0.25, 0.25))
+        self.partial_levels = tuple(abs(_normalize_ratio(x) or 0.0) for x in self.partial_levels)
+        self.partial_sizes = tuple(abs(_normalize_ratio(x) or 0.0) for x in self.partial_sizes)
+        if not self.partial_levels or len(self.partial_levels) != len(self.partial_sizes):
+            self.partial_levels = (0.02, 0.03, 0.05)
+            self.partial_sizes = (0.25, 0.25, 0.25)
+        self.macd_fast_period = _coerce_setting(bot_settings, 'macd_fast_period', 2, int)
+        self.macd_slow_period = _coerce_setting(bot_settings, 'macd_slow_period', 39, int)
+        self.macd_signal_period = _coerce_setting(bot_settings, 'macd_signal_period', 6, int)
+        self.stoch_rsi_period = _coerce_setting(bot_settings, 'stoch_rsi_period', 14, int)
+        self.stoch_rsi_k_period = _coerce_setting(bot_settings, 'stoch_rsi_k_period', 3, int)
+        self.stoch_rsi_d_period = _coerce_setting(bot_settings, 'stoch_rsi_d_period', 3, int)
+        self.require_macd_confirmation = _as_bool(bot_settings.get('require_macd_confirmation', False), False)
+        self.require_stoch_rsi_confirmation = _as_bool(bot_settings.get('require_stoch_rsi_confirmation', False), False)
         self.round_trip_fee_rate = _coerce_setting(bot_settings, 'round_trip_fee_rate', 0.0011, float)
         self.major_leverage = _coerce_setting(bot_settings, 'major_leverage', 5.0, float)
         self.large_alt_leverage = _coerce_setting(bot_settings, 'large_alt_leverage', 3.0, float)
@@ -154,6 +217,9 @@ class Aribot:
             symbol for symbol, market in self.markets.items()
             if market.get('type') == 'swap' and market.get('quote') == self.market_quote
         ]
+        self.trade_symbols = self._resolve_trade_symbol_overrides(bot_settings.get('trade_symbols'))
+        if self.trade_symbols:
+            self.logger.info(f"🎯 Trade symbols override enabled: {len(self.trade_symbols)} symbols")
         self.btc_regime_symbol = self.resolve_btc_regime_symbol()
 
         self.db_file = str(bot_settings.get('db_file', 'usdt_bot_v2.db'))
@@ -521,16 +587,20 @@ class Aribot:
                 )
                 return None
 
-            ohlc4_values = self.calculate_ohlc4(ohlcv)
-            current_ohlc4 = ohlc4_values[-1]
-            btc_wma_200 = self.calculate_wma(ohlc4_values, period=45, offset=0)
-            if btc_wma_200 is None:
+            source_values = self.calculate_source_series(ohlcv, self.btc_regime_source)
+            current_source = source_values[-1]
+            btc_wma = self.calculate_wma(
+                source_values,
+                period=self.btc_regime_wma_period,
+                offset=self.btc_regime_wma_offset,
+            )
+            if btc_wma is None:
                 self.logger.warning(
-                    f"⚠️ BTC regime WMA-200 calculation returned None for {self.btc_regime_symbol}"
+                    f"⚠️ BTC regime WMA calculation returned None for {self.btc_regime_symbol}"
                 )
                 return None
 
-            return 'BUY' if current_ohlc4 > btc_wma_200 else 'SELL'
+            return 'BUY' if current_source > btc_wma else 'SELL'
         except Exception as exc:
             self.logger.warning(
                 f"⚠️ BTC regime fetch failed for {self.btc_regime_symbol}: {type(exc).__name__}: {exc}"
@@ -649,6 +719,9 @@ class Aribot:
         return getattr(plugins, key, None)
 
     def get_trade_symbols(self):
+        if getattr(self, 'trade_symbols', None):
+            return list(self.trade_symbols)
+
         runtime_context = getattr(self, 'runtime_context', None)
         if runtime_context is not None and hasattr(runtime_context, 'trade_symbols'):
             return runtime_context.trade_symbols()
@@ -752,6 +825,60 @@ class Aribot:
             if isinstance(symbol, str) and symbol.strip():
                 normalized.add(symbol.strip().upper())
         return normalized
+
+    def _resolve_trade_symbol_overrides(self, raw_symbols):
+        if raw_symbols is None:
+            return []
+
+        if isinstance(raw_symbols, str):
+            requested = [x.strip().upper() for x in raw_symbols.split(',') if x.strip()]
+        elif isinstance(raw_symbols, (list, tuple)):
+            requested = [str(x).strip().upper() for x in raw_symbols if str(x).strip()]
+        else:
+            return []
+
+        if not requested:
+            return []
+
+        def _compact(symbol):
+            s = str(symbol or '').upper()
+            # Handle Bybit perpetual format: BASE/QUOTE:QUOTE -> BASEQUOTE
+            # E.g., LINK/USDT:USDT -> LINKUSDT, not LINKUSDTUSDT
+            if '/' in s:
+                parts = s.split('/')
+                base = parts[0].replace('-', '')
+                if len(parts) > 1:
+                    # Extract only the first quote occurrence (before any duplicate)
+                    quote_part = parts[1].split(':')[0] if ':' in parts[1] else parts[1]
+                    quote = quote_part.replace('-', '')
+                    return base + quote
+            return s.replace('/', '').replace(':', '').replace('-', '')
+
+        candidates = list(self.quote_swaps)
+        compact_to_market = {_compact(s): s for s in candidates}
+        selected = []
+        unresolved = []
+        for token in requested:
+            key = _compact(token)
+            market_symbol = compact_to_market.get(key)
+            if market_symbol:
+                selected.append(market_symbol)
+            else:
+                unresolved.append(token)
+
+        if unresolved:
+            self.logger.warning(
+                f"⚠️ Ignoring unresolved trade symbols: {', '.join(sorted(set(unresolved)))}"
+            )
+
+        out = []
+        seen = set()
+        for symbol in selected:
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            out.append(symbol)
+        return out
 
     def _read_bucket(self, cfg, key, default_leverage, default_symbols):
         bucket = cfg.get(key, {})
@@ -878,6 +1005,9 @@ class Aribot:
                 pnl REAL,
                 pnl_percentage REAL,
                 partial_exits_json TEXT DEFAULT '[]',
+                exchange_order_id TEXT,
+                avg_fill_price REAL,
+                slippage_bps REAL,
                 native_sl_active INTEGER DEFAULT 0,
                 native_tp_active INTEGER DEFAULT 0,
                 native_trail_active INTEGER DEFAULT 0,
@@ -923,6 +1053,12 @@ class Aribot:
         }
         if 'partial_exits_json' not in existing_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN partial_exits_json TEXT DEFAULT '[]'")
+        if 'exchange_order_id' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN exchange_order_id TEXT")
+        if 'avg_fill_price' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN avg_fill_price REAL")
+        if 'slippage_bps' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN slippage_bps REAL")
         if 'native_sl_active' not in existing_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN native_sl_active INTEGER DEFAULT 0")
         if 'native_tp_active' not in existing_columns:
@@ -933,6 +1069,9 @@ class Aribot:
             cursor.execute("ALTER TABLE positions ADD COLUMN native_sl_price REAL")
         if 'native_stops_cancelled_at' not in existing_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN native_stops_cancelled_at TEXT")
+
+        # Create indexes on positions table
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_exchange_order_id ON positions(exchange_order_id)")
 
         self.db.commit()
 
@@ -1705,6 +1844,11 @@ class Aribot:
                 row['quantity'],
                 datetime.datetime.fromisoformat(row['timestamp'])
             )
+            pos.hard_stop_pct = self.hard_stop_pct
+            pos.trailing_stop_trigger = self.trailing_trigger_pct
+            pos.trailing_stop_buffer = self.trailing_buffer_pct
+            pos.profit_taking_levels = list(self.partial_levels)
+            pos.profit_taking_sizes = list(self.partial_sizes)
             pos.stop_loss = row['stop_loss']
             pos.trailing_stop_level = row['trailing_stop_level']
             pos.trailing_stop_active = bool(row['trailing_stop_active'])
@@ -1841,6 +1985,167 @@ class Aribot:
     def calculate_ohlc4(self, ohlcv_data):
         return domain_calculate_ohlc4(ohlcv_data)
 
+    def calculate_source_series(self, ohlcv_data, source):
+        normalized = str(source or 'ohlc4').strip().lower()
+        if normalized == 'open':
+            return [float(c[1]) for c in ohlcv_data]
+        if normalized == 'high':
+            return [float(c[2]) for c in ohlcv_data]
+        if normalized == 'low':
+            return [float(c[3]) for c in ohlcv_data]
+        if normalized == 'close':
+            return [float(c[4]) for c in ohlcv_data]
+        if normalized == 'hl2':
+            return [(float(c[2]) + float(c[3])) / 2.0 for c in ohlcv_data]
+        if normalized == 'hlc3':
+            return [(float(c[2]) + float(c[3]) + float(c[4])) / 3.0 for c in ohlcv_data]
+        return self.calculate_ohlc4(ohlcv_data)
+
+    def calculate_ema_series(self, values, period):
+        out = [None] * len(values)
+        if period <= 0 or len(values) < period:
+            return out
+
+        multiplier = 2.0 / (period + 1)
+        ema = sum(values[:period]) / period
+        out[period - 1] = ema
+        for idx in range(period, len(values)):
+            ema = ((values[idx] - ema) * multiplier) + ema
+            out[idx] = ema
+        return out
+
+    def calculate_macd_diff_series(self, values, fast_period=2, slow_period=39, signal_period=6):
+        fast_ema = self.calculate_ema_series(values, fast_period)
+        slow_ema = self.calculate_ema_series(values, slow_period)
+
+        macd_line = [None] * len(values)
+        macd_values = []
+        macd_indexes = []
+        for idx in range(len(values)):
+            fast = fast_ema[idx]
+            slow = slow_ema[idx]
+            if fast is None or slow is None:
+                continue
+            value = fast - slow
+            macd_line[idx] = value
+            macd_values.append(value)
+            macd_indexes.append(idx)
+
+        signal_partial = self.calculate_ema_series(macd_values, signal_period)
+        out = [None] * len(values)
+        for series_idx, candle_idx in enumerate(macd_indexes):
+            signal = signal_partial[series_idx]
+            macd = macd_line[candle_idx]
+            if signal is None or macd is None:
+                continue
+            out[candle_idx] = macd - signal
+        return out
+
+    def calculate_rsi_series(self, values, period=14):
+        out = [None] * len(values)
+        if period <= 0 or len(values) <= period:
+            return out
+
+        gains = []
+        losses = []
+        for idx in range(1, period + 1):
+            change = values[idx] - values[idx - 1]
+            gains.append(max(change, 0.0))
+            losses.append(max(-change, 0.0))
+
+        avg_gain = sum(gains) / period
+        avg_loss = sum(losses) / period
+        if avg_loss == 0:
+            out[period] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            out[period] = 100.0 - (100.0 / (1.0 + rs))
+
+        for idx in range(period + 1, len(values)):
+            change = values[idx] - values[idx - 1]
+            gain = max(change, 0.0)
+            loss = max(-change, 0.0)
+            avg_gain = ((avg_gain * (period - 1)) + gain) / period
+            avg_loss = ((avg_loss * (period - 1)) + loss) / period
+            if avg_loss == 0:
+                out[idx] = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                out[idx] = 100.0 - (100.0 / (1.0 + rs))
+        return out
+
+    def calculate_sma_optional_series(self, values, period):
+        out = [None] * len(values)
+        if period <= 0:
+            return out
+
+        window = []
+        for idx, value in enumerate(values):
+            if value is None:
+                window = []
+                continue
+            window.append(value)
+            if len(window) > period:
+                window.pop(0)
+            if len(window) == period:
+                out[idx] = sum(window) / period
+        return out
+
+    def calculate_stoch_rsi_series(self, values, rsi_period=14, k_period=3, d_period=3):
+        rsi_series = self.calculate_rsi_series(values, period=rsi_period)
+        stoch_raw = [None] * len(values)
+
+        for idx in range(len(values)):
+            if idx < rsi_period:
+                continue
+            window = rsi_series[idx - rsi_period + 1: idx + 1]
+            if len(window) < rsi_period or any(value is None for value in window):
+                continue
+            typed_window = [float(value) for value in window if value is not None]
+            lowest = min(typed_window)
+            highest = max(typed_window)
+            current = rsi_series[idx]
+            if current is None:
+                continue
+            if math.isclose(highest, lowest):
+                stoch_raw[idx] = 0.0
+            else:
+                stoch_raw[idx] = ((current - lowest) / (highest - lowest)) * 100.0
+
+        k_series = self.calculate_sma_optional_series(stoch_raw, k_period)
+        d_series = self.calculate_sma_optional_series(k_series, d_period)
+        return k_series, d_series
+
+    def confirm_optional_indicators(self, signal_type, signal_index, macd_diff_series, stoch_k_series, stoch_d_series):
+        check_index = signal_index - 1
+        if check_index < 0:
+            return False
+
+        if self.require_macd_confirmation:
+            macd_diff = macd_diff_series[check_index]
+            if macd_diff is None:
+                return False
+            if signal_type == 'BUY' and macd_diff <= 0:
+                return False
+            if signal_type == 'SELL' and macd_diff >= 0:
+                return False
+
+        if self.require_stoch_rsi_confirmation:
+            stoch_k = stoch_k_series[check_index]
+            stoch_d = stoch_d_series[check_index]
+            if stoch_k is None or stoch_d is None:
+                return False
+            if signal_type == 'BUY' and stoch_k <= stoch_d:
+                return False
+            if signal_type == 'SELL' and stoch_k >= stoch_d:
+                return False
+            if signal_type == 'BUY' and stoch_k > 80:
+                return False
+            if signal_type == 'SELL' and stoch_k < 20:
+                return False
+
+        return True
+
     def confirm_signal(self, ohlcv_data, ohlc4_values, wma_values, current_index, signal_type):
         if signal_type not in ['BUY', 'SELL']:
             return False
@@ -1921,25 +2226,60 @@ class Aribot:
             if for_entry and not self.passes_volume_filter(symbol, ticker):
                 return None
 
-            ohlcv = self.fetch_symbol_ohlcv(symbol, '4h', limit=100)
-            if not ohlcv or len(ohlcv) < 47:
+            min_history = max(
+                self.signal_wma_period + max(0, self.signal_wma_offset),
+                self.macd_slow_period + self.macd_signal_period,
+                (self.stoch_rsi_period * 2) + self.stoch_rsi_k_period + self.stoch_rsi_d_period,
+            )
+            fetch_limit = max(100, min_history + 8)
+            ohlcv = self.fetch_symbol_ohlcv(symbol, '4h', limit=fetch_limit)
+            if not ohlcv or len(ohlcv) < min_history:
                 return None
-            ohlc4_values = self.calculate_ohlc4(ohlcv)
-            wma_values = [self.calculate_wma(ohlc4_values[:i+1]) for i in range(len(ohlc4_values))]
+
+            source_values = self.calculate_source_series(ohlcv, self.signal_source)
+            wma_values = [
+                self.calculate_wma(
+                    source_values[:i+1],
+                    period=self.signal_wma_period,
+                    offset=self.signal_wma_offset,
+                )
+                for i in range(len(source_values))
+            ]
             wma = wma_values[-1]
             if wma is None:
                 return None
-            current_ohlc4 = ohlc4_values[-1]
-            atr = self.calculate_atr(ohlcv, period=14)
-            atr_ratio = (atr / current_ohlc4) if atr is not None and current_ohlc4 > 0 else 0.0
-            diff = current_ohlc4 - wma
+
+            current_value = source_values[-1]
+            atr = self.calculate_atr(ohlcv, period=self.atr_period)
+            atr_ratio = (atr / current_value) if atr is not None and current_value > 0 else 0.0
+            diff = current_value - wma
             signal_type = 'BUY' if diff > 0 else 'SELL'
-            confirmed = self.confirm_signal(ohlcv, ohlc4_values, wma_values, len(ohlcv)-1, signal_type)
+
+            confirmed = self.confirm_signal(ohlcv, source_values, wma_values, len(ohlcv) - 1, signal_type)
+            macd_diff_series = self.calculate_macd_diff_series(
+                source_values,
+                fast_period=self.macd_fast_period,
+                slow_period=self.macd_slow_period,
+                signal_period=self.macd_signal_period,
+            )
+            stoch_k_series, stoch_d_series = self.calculate_stoch_rsi_series(
+                source_values,
+                rsi_period=self.stoch_rsi_period,
+                k_period=self.stoch_rsi_k_period,
+                d_period=self.stoch_rsi_d_period,
+            )
+            indicator_confirmed = self.confirm_optional_indicators(
+                signal_type,
+                len(ohlcv) - 1,
+                macd_diff_series,
+                stoch_k_series,
+                stoch_d_series,
+            )
             return {
                 'symbol': symbol,
-                'current_price': current_ohlc4,
+                'current_price': current_value,
                 'signal': signal_type,
-                'confirmed': confirmed,
+                'confirmed': bool(confirmed and indicator_confirmed),
                 'atr_ratio': atr_ratio,
             }
         except Exception:
@@ -1947,6 +2287,12 @@ class Aribot:
 
     def open_position(self, analysis):
         symbol = analysis['symbol']
+        configured = set(getattr(self, 'trade_symbols', []) or [])
+        if configured and symbol not in configured:
+            self.logger.warning(
+                f"⚠️ Blocked entry for {symbol}: symbol is outside configured trade_symbols override"
+            )
+            return False
         if symbol in self.positions:
             return False
         if len(self.positions) >= self.max_open_positions:
@@ -2025,6 +2371,11 @@ class Aribot:
             price, qty = confirmed_price, confirmed_qty
 
         pos = PaperPosition(symbol, side, price, qty, datetime.datetime.now())
+        pos.hard_stop_pct = self.hard_stop_pct
+        pos.trailing_stop_trigger = self.trailing_trigger_pct
+        pos.trailing_stop_buffer = self.trailing_buffer_pct
+        pos.profit_taking_levels = list(self.partial_levels)
+        pos.profit_taking_sizes = list(self.partial_sizes)
         pos.round_trip_fee_rate = self.round_trip_fee_rate
         self.positions[symbol] = pos
         self.persist_position(pos)
@@ -2774,6 +3125,11 @@ class Aribot:
         self.logger.info('🚀 Starting paper_bot_v2...')
         self.logger.info(
             f"🧭 Environment: mode={self.bot_mode}, testnet={self.bybit_testnet}, kill_switch_file={self.kill_switch_file}"
+        )
+
+        allowed_symbols = list(self.get_trade_symbols())
+        self.logger.info(
+            f"🧾 Allowed entry symbols ({len(allowed_symbols)}): {', '.join(allowed_symbols)}"
         )
 
         if Path(self.kill_switch_file).exists():

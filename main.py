@@ -8,6 +8,7 @@ import sys
 
 from aribot.runtime.bootstrap import Bootstrap
 from aribot.runtime.runner import Runner
+from secret_loader import SecretValidationError
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -38,7 +39,18 @@ def main(argv: list[str] | None = None) -> int:
         emoji_mode=resolve_emoji_mode(args),
         run_migrations=not args.no_migrate,
     )
-    ctx = bootstrap.build()
+    try:
+        ctx = bootstrap.build()
+    except SecretValidationError as exc:
+        message = str(exc)
+        print(f"Startup validation failed: {message}", file=sys.stderr)
+        if "Kill switch file detected at startup" in message:
+            print(
+                "Action: remove/rename kill_switch.flag when you intentionally want trading enabled.",
+                file=sys.stderr,
+            )
+        return 2
+
     return Runner(ctx.bot).run()
 
 

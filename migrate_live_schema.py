@@ -55,10 +55,15 @@ CREATE TABLE IF NOT EXISTS fills (
 FUNDING_PAYMENTS_DDL = """
 CREATE TABLE IF NOT EXISTS funding_payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
     symbol TEXT NOT NULL,
-    rate REAL NOT NULL,
+    position_side TEXT NOT NULL,
+    position_qty REAL NOT NULL,
+    funding_rate REAL NOT NULL,
+    mark_price REAL NOT NULL,
     payment REAL NOT NULL,
-    timestamp TEXT NOT NULL
+    run_id TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'estimated'
 );
 """
 
@@ -84,8 +89,8 @@ INDEX_DDLS = [
     "CREATE INDEX IF NOT EXISTS idx_orders_filled_at ON orders(filled_at);",
     "CREATE INDEX IF NOT EXISTS idx_fills_order_id ON fills(order_id);",
     "CREATE INDEX IF NOT EXISTS idx_fills_symbol_timestamp ON fills(symbol, timestamp);",
-    "CREATE INDEX IF NOT EXISTS idx_funding_payments_symbol_timestamp ON funding_payments(symbol, timestamp);",
-    "CREATE INDEX IF NOT EXISTS idx_funding_payments_timestamp ON funding_payments(timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_funding_payments_symbol_ts ON funding_payments(symbol, ts);",
+    "CREATE INDEX IF NOT EXISTS idx_funding_payments_ts ON funding_payments(ts);",
     "CREATE INDEX IF NOT EXISTS idx_kill_switch_log_timestamp ON kill_switch_log(timestamp);",
     # Existing analytics table recommendations.
     "CREATE INDEX IF NOT EXISTS idx_closed_trades_symbol_close_time ON closed_trades(symbol, close_time);",
@@ -107,6 +112,9 @@ def table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
 
 
 def ensure_positions_columns(cursor: sqlite3.Cursor) -> None:
+    # Skip if positions table doesn't exist yet; engine.py will create it with all columns.
+    if not table_exists(cursor, "positions"):
+        return
     existing_columns = get_columns(cursor, "positions")
     for column_name, column_type in POSITIONS_ADDITIONAL_COLUMNS.items():
         if column_name not in existing_columns:
@@ -119,7 +127,7 @@ def migrate_funding_payments(cursor: sqlite3.Cursor) -> None:
         return
 
     existing_columns = get_columns(cursor, "funding_payments")
-    desired_columns = {"id", "symbol", "rate", "payment", "timestamp"}
+    desired_columns = {"id", "ts", "symbol", "position_side", "position_qty", "funding_rate", "mark_price", "payment", "run_id", "source"}
     if desired_columns.issubset(existing_columns):
         return
 
@@ -127,18 +135,19 @@ def migrate_funding_payments(cursor: sqlite3.Cursor) -> None:
     cursor.execute(FUNDING_PAYMENTS_DDL.replace("funding_payments", "funding_payments_v2"))
 
     source_symbol = "symbol" if "symbol" in existing_columns else "NULL"
-    source_rate = "rate" if "rate" in existing_columns else "funding_rate"
-    if source_rate not in existing_columns:
-        source_rate = "0.0"
+    source_ts = "timestamp" if "timestamp" in existing_columns else "datetime('now')"
+    source_position_side = "position_side" if "position_side" in existing_columns else "'LONG'"
+    source_position_qty = "position_qty" if "position_qty" in existing_columns else "0.0"
+    source_funding_rate = "funding_rate" if "funding_rate" in existing_columns else ("rate" if "rate" in existing_columns else "0.0")
+    source_mark_price = "mark_price" if "mark_price" in existing_columns else "0.0"
     source_payment = "payment" if "payment" in existing_columns else "0.0"
-    source_timestamp = "timestamp" if "timestamp" in existing_columns else "ts"
-    if source_timestamp not in existing_columns:
-        source_timestamp = "datetime('now')"
+    source_run_id = "run_id" if "run_id" in existing_columns else "'migration'"
+    source_source = "source" if "source" in existing_columns else "'legacy'"
 
     cursor.execute(
         f"""
-        INSERT INTO funding_payments_v2 (id, symbol, rate, payment, timestamp)
-        SELECT id, {source_symbol}, {source_rate}, {source_payment}, {source_timestamp}
+        INSERT INTO funding_payments_v2 (id, ts, symbol, position_side, position_qty, funding_rate, mark_price, payment, run_id, source)
+        SELECT id, {source_ts}, {source_symbol}, {source_position_side}, {source_position_qty}, {source_funding_rate}, {source_mark_price}, {source_payment}, {source_run_id}, {source_source}
         FROM funding_payments
         """
     )
@@ -165,8 +174,14 @@ def run_migration(db_path: Path) -> None:
         migrate_funding_payments(cursor)
         cursor.execute(KILL_SWITCH_LOG_DDL)
 
+        # Create indexes only for tables that exist. Positions table is created by engine.py later.
         for ddl in INDEX_DDLS:
-            cursor.execute(ddl)
+            try:
+                cursor.execute(ddl)
+            except sqlite3.OperationalError as e:
+                # Skip indexes for tables that don't exist yet (e.g., positions created by engine.py)
+                if "no such table" not in str(e):
+                    raise
 
         conn.commit()
     except Exception:

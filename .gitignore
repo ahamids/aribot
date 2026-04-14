@@ -24,4 +24,4 @@ ARCHIVED_*.log
 ARCHIVED_*.txt
 
 # Local analysis outputs
-bucket_classification_report.json
+backtest_artifacts/

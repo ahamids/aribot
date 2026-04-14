@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from aribot.config.loader import load_bot_config
 from aribot.config.models import BotConfig
+from aribot.config.recipes import resolve_recipe_defaults
 from aribot.persistence.db import run_startup_migrations
 from aribot.plugins.execution_context import PluginExecutionContext
 from aribot.plugins.factory import build_runtime_plugins
@@ -88,6 +89,13 @@ class Bootstrap:
             raise
 
         bot_settings = dict(config.raw.get("bot", {}))
+        recipe_name = str(bot_settings.get("recipe") or os.getenv("ARIBOT_RECIPE", "")).strip().lower()
+        if recipe_name:
+            recipe_defaults = resolve_recipe_defaults(recipe_name)
+            for key, value in recipe_defaults.items():
+                # Keep explicit config overrides higher priority than recipe defaults.
+                bot_settings.setdefault(key, value)
+            bot_settings["recipe"] = recipe_name
         bot_settings.setdefault("db_file", config.runtime.db_path)
         bot_settings.setdefault("market_quote", config.trading.market_quote)
 

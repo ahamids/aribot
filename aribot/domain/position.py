@@ -24,6 +24,9 @@ class PaperPosition:
 
         self.peak_pnl_percentage = 0.0
 
+        # Defaults preserve legacy behavior; runtime can override per recipe.
+        self.hard_stop_pct = 0.025
+
         self.profit_taking_levels = [0.02, 0.03, 0.05]
         self.profit_taking_sizes = [0.25, 0.25, 0.25]
         self.partial_exits = []
@@ -54,7 +57,7 @@ class PaperPosition:
             self.peak_pnl_percentage = self.pnl_percentage
 
     def should_close_for_loss(self):
-        return self.pnl_percentage <= -2.5
+        return self.pnl_percentage <= -(self.hard_stop_pct * 100.0)
 
     def should_close_for_stop_loss(self):
         if self.stop_loss is None:
