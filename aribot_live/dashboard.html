@@ -1,0 +1,1529 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ARIBOT LIVE Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f2f6fa;
+      --bg-grad-a: #e8eff8;
+      --bg-grad-b: #f7f9fc;
+      --surface: #ffffff;
+      --surface-2: #f4f7fb;
+      --text: #17212b;
+      --text-soft: #5a6876;
+      --border: #d7e0ea;
+      --accent: #005f73;
+      --accent-2: #0a9396;
+      --good: #1b8f4f;
+      --bad: #c13d3d;
+      --warn: #b78103;
+      --info: #2161a6;
+      --shadow: 0 10px 30px rgba(18, 33, 52, 0.08);
+      --badge-muted: #6d7785;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12171f;
+        --bg-grad-a: #1a2330;
+        --bg-grad-b: #0f141b;
+        --surface: #1a222d;
+        --surface-2: #202b39;
+        --text: #e8edf3;
+        --text-soft: #a4b0be;
+        --border: #324355;
+        --accent: #5fb9c8;
+        --accent-2: #7ad4c9;
+        --good: #5fd08d;
+        --bad: #ff7f7f;
+        --warn: #ffd166;
+        --info: #7bb5ff;
+        --shadow: 0 12px 34px rgba(0, 0, 0, 0.35);
+        --badge-muted: #a6b2bf;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Trebuchet MS", "Noto Sans", sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% -20%, var(--bg-grad-a), transparent),
+        radial-gradient(1000px 500px at 90% -40%, var(--bg-grad-b), transparent),
+        var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .app-shell {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .tab-btn.active {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff;
+      border-color: transparent;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+
+    .metrics-row {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 68px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .metric-label {
+      color: var(--text-soft);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .metric-value {
+      font-size: 1rem;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .span-2 { grid-column: span 2; }
+    .span-3 { grid-column: span 3; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      border: 1px solid transparent;
+    }
+
+    .badge.mode-live { background: #1b8f4f; color: #fff; border-color: #1b8f4f; }
+    .badge.mode-paper { background: #6d7785; color: #fff; border-color: #6d7785; }
+    .badge.mode-shadow { background: #b78103; color: #fff; border-color: #b78103; }
+    .badge.mode-unknown { background: rgba(109, 119, 133, 0.2); color: var(--badge-muted); border-color: rgba(109, 119, 133, 0.35); }
+    .badge.good { background: rgba(27, 143, 79, 0.15); color: var(--good); border-color: rgba(27, 143, 79, 0.35); }
+    .badge.bad { background: rgba(193, 61, 61, 0.15); color: var(--bad); border-color: rgba(193, 61, 61, 0.35); }
+    .badge.warn { background: rgba(183, 129, 3, 0.2); color: var(--warn); border-color: rgba(183, 129, 3, 0.35); }
+    .badge.info { background: rgba(33, 97, 166, 0.15); color: var(--info); border-color: rgba(33, 97, 166, 0.35); }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 14px;
+    }
+
+    .chart-wrap {
+      height: 240px;
+      position: relative;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .positions-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+
+    @media (min-width: 1280px) {
+      .positions-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 1024px) {
+      .app-shell { padding: 12px; }
+      .split { grid-template-columns: 1fr; }
+      .positions-grid { grid-template-columns: 1fr; }
+      .metrics-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .span-2, .span-3 { grid-column: span 1; }
+    }
+
+    .pos-card {
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    .pos-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .symbol {
+      font-weight: 800;
+      letter-spacing: 0.03em;
+    }
+
+    .row-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 12px;
+      font-size: 0.86rem;
+    }
+
+    .row-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px dashed var(--border);
+      padding-bottom: 4px;
+    }
+
+    .row-item .k { color: var(--text-soft); }
+    .row-item .v { font-weight: 600; text-align: right; }
+
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff;
+      border-color: transparent;
+    }
+
+    .btn.danger {
+      background: rgba(193, 61, 61, 0.12);
+      border-color: rgba(193, 61, 61, 0.4);
+      color: var(--bad);
+    }
+
+    .btn.warning {
+      background: rgba(183, 129, 3, 0.16);
+      border-color: rgba(183, 129, 3, 0.35);
+      color: var(--warn);
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 840px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.86rem;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--text-soft);
+      font-weight: 700;
+      background: var(--surface-2);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .collapsible-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+      margin-bottom: 10px;
+    }
+
+    .events {
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface-2);
+      font-family: Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.8rem;
+      padding: 8px;
+    }
+
+    .event-line {
+      display: grid;
+      grid-template-columns: 140px 80px 1fr;
+      gap: 8px;
+      padding: 3px 2px;
+      border-bottom: 1px dotted var(--border);
+    }
+
+    .lvl-debug { color: var(--badge-muted); }
+    .lvl-info { color: var(--info); }
+    .lvl-warning { color: var(--warn); }
+    .lvl-error, .lvl-critical { color: var(--bad); }
+
+    .hint {
+      color: var(--text-soft);
+      font-size: 0.82rem;
+    }
+
+    .error-banner {
+      border: 1px solid rgba(193, 61, 61, 0.4);
+      background: rgba(193, 61, 61, 0.12);
+      color: var(--bad);
+      border-radius: 10px;
+      padding: 9px 12px;
+      margin-bottom: 12px;
+      font-weight: 700;
+    }
+
+    .pending {
+      border: 1px solid rgba(183, 129, 3, 0.4);
+      background: rgba(183, 129, 3, 0.12);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 12px;
+    }
+
+    .control-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    @media (max-width: 1024px) {
+      .control-grid { grid-template-columns: 1fr; }
+    }
+
+    .ctrl-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface-2);
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    @media (max-width: 1024px) {
+      .field-grid { grid-template-columns: 1fr; }
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .field label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-soft);
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .field input,
+    .field textarea,
+    .field select {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      font: inherit;
+    }
+
+    .field textarea {
+      min-height: 210px;
+      resize: vertical;
+      font-family: Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.8rem;
+    }
+
+    .group-block {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      background: var(--surface-2);
+      margin-bottom: 10px;
+    }
+
+    .group-title {
+      margin: 0 0 8px;
+      font-size: 0.9rem;
+    }
+
+    .unsaved {
+      border: 1px solid rgba(183, 129, 3, 0.5);
+      background: rgba(183, 129, 3, 0.16);
+      border-radius: 10px;
+      padding: 9px 12px;
+      margin-bottom: 10px;
+      font-weight: 700;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 14px;
+    }
+
+    .modal {
+      width: min(560px, 100%);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .footer-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .empty {
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      text-align: center;
+      color: var(--text-soft);
+      background: var(--surface-2);
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="module">
+    import React, { useEffect, useMemo, useRef, useState } from "https://esm.sh/react@18.2.0";
+    import { createRoot } from "https://esm.sh/react-dom@18.2.0/client";
+
+    const h = React.createElement;
+    const POLL_MS = 5000;
+    const ERROR_TEXT = "Connection error \u2014 retrying";
+
+    function cls() {
+      return Array.from(arguments).filter(Boolean).join(" ");
+    }
+
+    function fmtMoney(v) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
+      return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(Number(v));
+    }
+
+    function fmtNum(v, d = 2) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
+      return Number(v).toFixed(d);
+    }
+
+    function fmtPct(v, d = 2) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
+      const n = Number(v);
+      return `${n >= 0 ? "+" : ""}${n.toFixed(d)}%`;
+    }
+
+    function iso(v) {
+      if (!v) return "-";
+      const d = new Date(v);
+      return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+    }
+
+    function parseJson(text) {
+      try {
+        return { ok: true, value: JSON.parse(text), error: "" };
+      } catch (err) {
+        return { ok: false, value: null, error: err instanceof Error ? err.message : "Invalid JSON" };
+      }
+    }
+
+    function levelClass(level) {
+      const l = String(level || "info").toLowerCase();
+      if (l.includes("critical")) return "lvl-critical";
+      if (l.includes("error")) return "lvl-error";
+      if (l.includes("warn")) return "lvl-warning";
+      if (l.includes("debug")) return "lvl-debug";
+      return "lvl-info";
+    }
+
+    function eventText(e) {
+      if (!e || typeof e !== "object") return "";
+      return String(e.message || e.msg || e.event || e.reason || JSON.stringify(e));
+    }
+
+    async function fetchJson(path) {
+      const res = await fetch(path, { headers: { "Accept": "application/json" } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    }
+
+    function stableSortObject(obj) {
+      if (Array.isArray(obj)) return obj.map(stableSortObject);
+      if (obj && typeof obj === "object") {
+        const out = {};
+        Object.keys(obj).sort().forEach((k) => {
+          out[k] = stableSortObject(obj[k]);
+        });
+        return out;
+      }
+      return obj;
+    }
+
+    function isEqualJson(a, b) {
+      return JSON.stringify(stableSortObject(a)) === JSON.stringify(stableSortObject(b));
+    }
+
+    function ModeBadge({ mode }) {
+      const m = String(mode || "unknown").toLowerCase();
+      const kind = m.includes("live") ? "live" : m.includes("shadow") ? "shadow" : m.includes("paper") ? "paper" : "unknown";
+      return h("span", { className: cls("badge", `mode-${kind}`) }, (mode || "UNKNOWN").toUpperCase());
+    }
+
+    function EquityChart({ points, startBalance }) {
+      const canvasRef = useRef(null);
+      const chartRef = useRef(null);
+
+      useEffect(() => {
+        if (!canvasRef.current || typeof Chart === "undefined") return;
+        const labels = points.map((p, i) => p.close_time || `T${i + 1}`);
+        const equitySeries = points.map((p) => Number(p.equity || 0));
+        const lineValue = Number(startBalance || 0);
+        const baseline = labels.map(() => lineValue);
+
+        if (chartRef.current) {
+          chartRef.current.destroy();
+          chartRef.current = null;
+        }
+
+        chartRef.current = new Chart(canvasRef.current, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              {
+                label: "Equity",
+                data: equitySeries,
+                borderColor: "#0a9396",
+                backgroundColor: "rgba(10,147,150,0.15)",
+                tension: 0.28,
+                pointRadius: 0,
+                borderWidth: 2,
+                fill: true,
+              },
+              {
+                label: "Session Start",
+                data: baseline,
+                borderColor: "#b78103",
+                borderDash: [7, 5],
+                pointRadius: 0,
+                borderWidth: 1.5,
+                fill: false,
+              },
+            ],
+          },
+          options: {
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: {
+              legend: { display: true, labels: { boxWidth: 10 } },
+              tooltip: {
+                callbacks: {
+                  afterBody(items) {
+                    if (!items || !items.length) return "";
+                    const idx = items[0].dataIndex;
+                    const eq = equitySeries[idx] || 0;
+                    const delta = eq - lineValue;
+                    return `Delta vs start: ${delta >= 0 ? "+" : ""}${fmtMoney(delta)}`;
+                  },
+                },
+              },
+            },
+            scales: {
+              x: { ticks: { maxTicksLimit: 6 } },
+              y: { ticks: { callback: (v) => fmtMoney(v) } },
+            },
+          },
+        });
+
+        return () => {
+          if (chartRef.current) {
+            chartRef.current.destroy();
+            chartRef.current = null;
+          }
+        };
+      }, [points, startBalance]);
+
+      if (!points.length) {
+        return h("div", { className: "empty" }, "No equity points yet. Equity appears after closed trades are recorded.");
+      }
+
+      return h("div", { className: "chart-wrap" }, h("canvas", { ref: canvasRef }));
+    }
+
+    function Modal({ title, children, actions, onClose }) {
+      return h(
+        "div",
+        {
+          className: "modal-backdrop",
+          onClick: (e) => {
+            if (e.target === e.currentTarget) onClose();
+          },
+        },
+        h("div", { className: "modal", role: "dialog", "aria-modal": "true" }, [
+          h("h3", { key: "t", style: { marginTop: 0 } }, title),
+          h("div", { key: "c" }, children),
+          h("div", { key: "a", className: "modal-actions" }, actions),
+        ])
+      );
+    }
+
+    function App() {
+      const [tab, setTab] = useState("dashboard");
+      const [status, setStatus] = useState(null);
+      const [positions, setPositions] = useState([]);
+      const [trades, setTrades] = useState([]);
+      const [events, setEvents] = useState([]);
+      const [equity, setEquity] = useState({ initial_balance: 0, current_balance: 0, points: [] });
+      const [tradesLimit, setTradesLimit] = useState(50);
+      const [eventsCollapsed, setEventsCollapsed] = useState(false);
+      const [connectionError, setConnectionError] = useState(false);
+      const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
+      const [secondsSinceUpdate, setSecondsSinceUpdate] = useState(0);
+      const [actionBusy, setActionBusy] = useState(false);
+      const [pendingAction, setPendingAction] = useState(null);
+      const [pendingSeconds, setPendingSeconds] = useState(0);
+
+      const [showCloseAllModal, setShowCloseAllModal] = useState(false);
+      const [closeSymbolTarget, setCloseSymbolTarget] = useState(null);
+      const [showKillStepOne, setShowKillStepOne] = useState(false);
+      const [showKillStepTwo, setShowKillStepTwo] = useState(false);
+      const [killInput, setKillInput] = useState("");
+
+      const [settingsLoaded, setSettingsLoaded] = useState(false);
+      const [settingsLoading, setSettingsLoading] = useState(false);
+      const [settingsSaving, setSettingsSaving] = useState(false);
+      const [settingsError, setSettingsError] = useState("");
+      const [settingsInfo, setSettingsInfo] = useState("");
+      const [settingsBaseline, setSettingsBaseline] = useState({ env: {}, leverage: {}, files: {} });
+      const [envState, setEnvState] = useState({});
+      const [leverageObj, setLeverageObj] = useState({});
+      const [leverageJson, setLeverageJson] = useState("{}");
+      const [leverageError, setLeverageError] = useState("");
+
+      const eventsRef = useRef(null);
+
+      const drawdown = useMemo(() => {
+        const pts = equity.points || [];
+        if (!pts.length) return 0;
+        let peak = Number(pts[0].equity || 0);
+        let maxDd = 0;
+        for (const p of pts) {
+          const v = Number(p.equity || 0);
+          if (v > peak) peak = v;
+          const dd = peak > 0 ? ((peak - v) / peak) * 100 : 0;
+          if (dd > maxDd) maxDd = dd;
+        }
+        return maxDd;
+      }, [equity]);
+
+      const winRate = useMemo(() => {
+        const w = Number(status?.winning_trades || 0);
+        const l = Number(status?.losing_trades || 0);
+        const t = w + l;
+        return t ? (w / t) * 100 : null;
+      }, [status]);
+
+      const cooldownActive = useMemo(() => {
+        if (!status?.cooldown_until_utc) return false;
+        const t = new Date(status.cooldown_until_utc).getTime();
+        if (Number.isNaN(t)) return false;
+        return t > Date.now();
+      }, [status]);
+
+      const circuitBadges = useMemo(() => {
+        return [
+          { label: "MANUAL PAUSE", active: !!status?.manual_entry_paused, type: "warn" },
+          { label: "DAILY HALT", active: !!status?.daily_drawdown_paused, type: "bad" },
+          { label: status?.cooldown_until_utc ? `COOLDOWN ${iso(status.cooldown_until_utc)}` : "COOLDOWN", active: cooldownActive, type: "info" },
+        ];
+      }, [status, cooldownActive]);
+
+      const leverageValid = leverageError === "";
+
+      const settingsDirty = useMemo(() => {
+        if (!settingsLoaded) return false;
+        const envDirty = !isEqualJson(envState, settingsBaseline.env);
+        const levDirty = !isEqualJson(leverageObj, settingsBaseline.leverage);
+        return envDirty || levDirty;
+      }, [envState, leverageObj, settingsBaseline, settingsLoaded]);
+
+      const canSave = settingsLoaded && settingsDirty && leverageValid && !settingsSaving;
+      const canSaveRestart = canSave && String(envState.RESTART_COMMAND || "").trim().length > 0;
+
+      function derivePendingFromStatus(s) {
+        if (!s || typeof s !== "object") return null;
+        const raw = s.telegram_pending_confirmations_json;
+        if (typeof raw !== "string" || !raw.trim()) return null;
+        const parsed = parseJson(raw);
+        if (!parsed.ok || !parsed.value || typeof parsed.value !== "object") return null;
+        return parsed.value;
+      }
+
+      async function pollDashboard() {
+        const requests = [
+          fetchJson("/api/status"),
+          fetchJson("/api/positions"),
+          fetchJson(`/api/trades?limit=${tradesLimit}`),
+          fetchJson("/api/equity"),
+          fetchJson("/api/events?limit=200"),
+        ];
+
+        const result = await Promise.allSettled(requests);
+
+        const okStatus = result[0].status === "fulfilled";
+        const okPositions = result[1].status === "fulfilled";
+        const okTrades = result[2].status === "fulfilled";
+        const okEquity = result[3].status === "fulfilled";
+        const okEvents = result[4].status === "fulfilled";
+
+        if (okStatus) {
+          const s = result[0].value;
+          setStatus(s);
+          const derivedPending = derivePendingFromStatus(s);
+          if (derivedPending) setPendingAction(derivedPending);
+        }
+        if (okPositions) setPositions(Array.isArray(result[1].value) ? result[1].value : []);
+        if (okTrades) setTrades(Array.isArray(result[2].value) ? result[2].value : []);
+        if (okEquity) {
+          const eqRaw = result[3].value;
+          if (Array.isArray(eqRaw)) {
+            const points = eqRaw.map((p, i) => ({ close_time: p.timestamp || `T${i + 1}`, equity: Number(p.balance || 0) }));
+            const current = points.length ? Number(points[points.length - 1].equity || 0) : Number(status?.session_start_balance || 0);
+            setEquity({ initial_balance: Number(status?.session_start_balance || 0), current_balance: current, points });
+          } else {
+            setEquity(eqRaw || { initial_balance: 0, current_balance: 0, points: [] });
+          }
+        }
+        if (okEvents) setEvents(Array.isArray(result[4].value) ? result[4].value : []);
+
+        const failed = !okStatus || !okPositions || !okTrades || !okEquity || !okEvents;
+        setConnectionError(failed);
+        if (!failed) {
+          const now = Date.now();
+          setLastUpdatedAt(now);
+          setSecondsSinceUpdate(0);
+        }
+      }
+
+      async function refreshControlSnapshot() {
+        const [s, p] = await Promise.all([fetchJson("/api/status"), fetchJson("/api/positions")]);
+        setStatus(s);
+        setPositions(Array.isArray(p) ? p : []);
+        const pending = derivePendingFromStatus(s);
+        if (pending) setPendingAction(pending);
+      }
+
+      async function loadSettings() {
+        setSettingsLoading(true);
+        setSettingsError("");
+        try {
+          const data = await fetchJson("/api/settings");
+          const env = data?.env && typeof data.env === "object" ? data.env : {};
+          const leverage = data?.leverage_buckets && typeof data.leverage_buckets === "object" ? data.leverage_buckets : (data?.leverage && typeof data.leverage === "object" ? data.leverage : {});
+          const baseline = { env, leverage, files: data?.files || {} };
+          setSettingsBaseline(baseline);
+          setEnvState(env);
+          setLeverageObj(leverage);
+          setLeverageJson(JSON.stringify(leverage, null, 2));
+          setLeverageError("");
+          setSettingsLoaded(true);
+        } catch (err) {
+          setSettingsError(err instanceof Error ? err.message : "Failed to load settings");
+        } finally {
+          setSettingsLoading(false);
+        }
+      }
+
+      async function doControl(action, symbol) {
+        setActionBusy(true);
+        try {
+          const body = { action };
+          if (symbol) body.symbol = symbol;
+          const res = await fetch("/api/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) {
+            throw new Error(`Control failed: HTTP ${res.status}`);
+          }
+          const data = await res.json();
+          if (data.pending) setPendingAction(data.pending);
+          await refreshControlSnapshot();
+        } catch (err) {
+          alert(err instanceof Error ? err.message : "Control action failed");
+        } finally {
+          setActionBusy(false);
+        }
+      }
+
+      async function saveSettings(restart) {
+        setSettingsSaving(true);
+        setSettingsError("");
+        setSettingsInfo("");
+        try {
+          const res = await fetch("/api/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ env: envState, leverage_buckets: leverageObj, restart: !!restart }),
+          });
+          if (!res.ok) throw new Error(`Save failed: HTTP ${res.status}`);
+          const out = await res.json();
+          setSettingsBaseline((prev) => ({ ...prev, env: { ...envState }, leverage: JSON.parse(JSON.stringify(leverageObj)) }));
+          const msg = out.restart_requested
+            ? (out.restart_triggered ? "Settings saved, restart triggered." : "Settings saved, restart requested but command is not configured.")
+            : "Settings saved.";
+          setSettingsInfo(msg);
+        } catch (err) {
+          setSettingsError(err instanceof Error ? err.message : "Save failed");
+        } finally {
+          setSettingsSaving(false);
+        }
+      }
+
+      useEffect(() => {
+        let stop = false;
+        let timer = null;
+
+        async function run() {
+          try {
+            await pollDashboard();
+          } catch (_err) {
+            setConnectionError(true);
+          }
+          if (!stop && tab === "dashboard") {
+            timer = setTimeout(run, POLL_MS);
+          }
+        }
+
+        if (tab === "dashboard") {
+          run();
+        }
+
+        return () => {
+          stop = true;
+          if (timer) clearTimeout(timer);
+        };
+      }, [tab, tradesLimit]);
+
+      useEffect(() => {
+        const id = setInterval(() => {
+          if (!lastUpdatedAt) return;
+          setSecondsSinceUpdate(Math.max(0, Math.floor((Date.now() - lastUpdatedAt) / 1000)));
+        }, 1000);
+        return () => clearInterval(id);
+      }, [lastUpdatedAt]);
+
+      useEffect(() => {
+        if (tab === "control") {
+          refreshControlSnapshot().catch(() => {});
+        }
+      }, [tab]);
+
+      useEffect(() => {
+        if (tab === "settings" && !settingsLoaded && !settingsLoading) {
+          loadSettings();
+        }
+      }, [tab, settingsLoaded, settingsLoading]);
+
+      useEffect(() => {
+        if (eventsCollapsed || !eventsRef.current) return;
+        eventsRef.current.scrollTop = eventsRef.current.scrollHeight;
+      }, [events, eventsCollapsed]);
+
+      useEffect(() => {
+        const id = setInterval(() => {
+          if (!pendingAction?.expires_at_utc) {
+            setPendingSeconds(0);
+            return;
+          }
+          const exp = new Date(pendingAction.expires_at_utc).getTime();
+          if (Number.isNaN(exp)) {
+            setPendingSeconds(0);
+            return;
+          }
+          const sec = Math.max(0, Math.floor((exp - Date.now()) / 1000));
+          setPendingSeconds(sec);
+          if (sec === 0) {
+            setPendingAction(null);
+          }
+        }, 1000);
+        return () => clearInterval(id);
+      }, [pendingAction]);
+
+      function onLeverageJsonChange(text) {
+        setLeverageJson(text);
+        const parsed = parseJson(text);
+        if (!parsed.ok) {
+          setLeverageError(`JSON parse error: ${parsed.error}`);
+          return;
+        }
+        if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+          setLeverageError("Leverage config must be a JSON object.");
+          return;
+        }
+        const validation = validateLeverage(parsed.value);
+        if (validation) {
+          setLeverageError(validation);
+          return;
+        }
+        setLeverageError("");
+        setLeverageObj(parsed.value);
+      }
+
+      function validateLeverage(obj) {
+        if (!obj || typeof obj !== "object" || Array.isArray(obj)) return "Leverage config must be an object.";
+        for (const key of Object.keys(obj)) {
+          const val = obj[key];
+          if (key === "default_leverage") {
+            if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) {
+              return "default_leverage must be a positive number.";
+            }
+            continue;
+          }
+          if (!val || typeof val !== "object" || Array.isArray(val)) {
+            return `Bucket '${key}' must be an object.`;
+          }
+          if (typeof val.leverage !== "number" || !Number.isFinite(val.leverage) || val.leverage <= 0) {
+            return `Bucket '${key}' requires numeric leverage > 0.`;
+          }
+          if (!Array.isArray(val.symbols) || val.symbols.some((s) => typeof s !== "string")) {
+            return `Bucket '${key}' requires symbols as string array.`;
+          }
+        }
+        return "";
+      }
+
+      function updateLeverageVisual(updater) {
+        setLeverageObj((prev) => {
+          const next = updater(JSON.parse(JSON.stringify(prev)));
+          const err = validateLeverage(next);
+          setLeverageError(err);
+          if (!err) {
+            setLeverageJson(JSON.stringify(next, null, 2));
+          }
+          return next;
+        });
+      }
+
+      const metricCards = [
+        { key: "mode", label: "Mode", render: () => h(ModeBadge, { mode: status?.bot_mode }), span: "span-2" },
+        { key: "balance", label: "Balance", value: fmtMoney(status?.current_balance), span: "span-2" },
+        {
+          key: "session",
+          label: "Session PnL",
+          value: fmtMoney(status?.session_pnl),
+          className: Number(status?.session_pnl || 0) >= 0 ? "good" : "bad",
+          span: "span-2",
+        },
+        {
+          key: "drawdown",
+          label: "Drawdown",
+          value: `${fmtNum(drawdown, 2)}%`,
+          className: drawdown >= 5 ? "bad" : drawdown >= 2 ? "warn" : "good",
+          span: "span-2",
+        },
+        {
+          key: "wl",
+          label: "W/L",
+          value: `${status?.winning_trades || 0}/${status?.losing_trades || 0} (${fmtNum(winRate, 1)}%)`,
+          span: "span-2",
+        },
+        {
+          key: "regime",
+          label: "Regime",
+          render: () => {
+            const reg = String(status?.last_regime_signal || "UNKNOWN").toUpperCase();
+            const k = reg === "BUY" ? "good" : reg === "SELL" ? "bad" : "mode-unknown";
+            return h("span", { className: cls("badge", k) }, reg);
+          },
+          span: "span-2",
+        },
+      ];
+
+      return h("div", { className: "app-shell" }, [
+        h("div", { key: "top", className: "topbar" }, [
+          h("div", { key: "title", className: "title" }, "ARIBOT LIVE Operator Panel"),
+          h("div", { key: "tabs", className: "tabs" }, [
+            h("button", { key: "dash", className: cls("tab-btn", tab === "dashboard" && "active"), onClick: () => setTab("dashboard") }, "Dashboard"),
+            h("button", { key: "ctrl", className: cls("tab-btn", tab === "control" && "active"), onClick: () => setTab("control") }, "Control"),
+            h("button", { key: "set", className: cls("tab-btn", tab === "settings" && "active"), onClick: () => setTab("settings") }, "Settings"),
+          ]),
+        ]),
+
+        connectionError ? h("div", { key: "connerr", className: "error-banner" }, ERROR_TEXT) : null,
+
+        pendingAction ? h("div", { key: "pending", className: "pending" }, [
+          h("div", { key: "p1", style: { fontWeight: 700, marginBottom: "4px" } }, "Pending action awaiting engine confirmation"),
+          h("div", { key: "p2", className: "hint" }, `${String(pendingAction.action || "unknown")} ${pendingAction.args?.symbol ? `(${pendingAction.args.symbol})` : ""}`),
+          h("div", { key: "p3", className: "hint" }, `Expires in ${pendingSeconds}s`),
+        ]) : null,
+
+        tab === "dashboard" ? h(React.Fragment, { key: "dashpanel" }, [
+          h("div", { key: "metrics", className: "panel" }, [
+            h("div", { key: "metricsrow", className: "metrics-row" }, [
+              ...metricCards.map((m) => h("div", { key: m.key, className: cls("metric", m.span) }, [
+                h("div", { key: "l", className: "metric-label" }, m.label),
+                h("div", { key: "v", className: cls("metric-value", m.className) }, m.render ? m.render() : m.value),
+              ])),
+              h("div", { key: "circuits", className: cls("metric", "span-3") }, [
+                h("div", { key: "l", className: "metric-label" }, "Circuit Breakers"),
+                h("div", { key: "v", className: "metric-value", style: { display: "flex", gap: "6px", flexWrap: "wrap" } },
+                  circuitBadges.filter((b) => b.active).length
+                    ? circuitBadges.filter((b) => b.active).map((b) => h("span", { key: b.label, className: cls("badge", b.type) }, b.label))
+                    : h("span", { className: "hint" }, "No active breakers")
+                ),
+              ]),
+              h("div", { key: "updated", className: cls("metric", "span-3") }, [
+                h("div", { key: "l", className: "metric-label" }, "Last Updated"),
+                h("div", { key: "v", className: "metric-value" }, `${secondsSinceUpdate}s ago`),
+                h("div", { key: "v2", className: "hint" }, status?.ts ? `Server: ${iso(status.ts)}` : "Awaiting first update"),
+              ]),
+            ]),
+          ]),
+
+          h("div", { key: "split1", className: "split" }, [
+            h("div", { key: "eq", className: "panel" }, [
+              h("div", { key: "t", className: "section-title" }, "Session Equity"),
+              h(EquityChart, {
+                points: Array.isArray(equity.points) ? equity.points : [],
+                startBalance: status?.session_start_balance ?? equity.initial_balance,
+              }),
+            ]),
+            h("div", { key: "eventsbox", className: "panel" }, [
+              h("div", {
+                key: "eh",
+                className: "collapsible-head",
+                onClick: () => setEventsCollapsed((v) => !v),
+              }, [
+                h("div", { key: "ttl", className: "section-title", style: { margin: 0 } }, "Event Log"),
+                h("button", { key: "btn", className: "btn", type: "button" }, eventsCollapsed ? "Event Log ▼" : "Event Log ▲"),
+              ]),
+              !eventsCollapsed ? (
+                events.length ? h("div", { className: "events", ref: eventsRef },
+                  events.map((e, i) => h("div", { key: `${e.ts || e.time || i}`, className: "event-line" }, [
+                    h("div", { key: "t" }, iso(e.ts || e.time || e.timestamp)),
+                    h("div", { key: "l", className: levelClass(e.level) }, String(e.level || "INFO").toUpperCase()),
+                    h("div", { key: "m" }, eventText(e)),
+                  ]))
+                ) : h("div", { className: "empty" }, "No events available yet.")) : null,
+            ]),
+          ]),
+
+          h("div", { key: "positions", className: "panel" }, [
+            h("div", { key: "h", className: "section-title" }, [
+              h("span", { key: "t" }, `Open Positions (${positions.length})`),
+              h("span", { key: "c", className: "hint" }, "Operator layout: 2 columns at 1280px, 1 column at 1024px"),
+            ]),
+            positions.length ? h("div", { className: "positions-grid" },
+              positions.map((p, idx) => {
+                const pnl = Number(p.pnl || 0);
+                const pp = Number(p.pnl_percentage || 0);
+                return h("div", { key: `${p.symbol}-${idx}`, className: "pos-card" }, [
+                  h("div", { key: "head", className: "pos-head" }, [
+                    h("div", { key: "left" }, [
+                      h("div", { key: "sym", className: "symbol" }, `${p.symbol || "-"} ${String(p.side || "").toUpperCase()}`),
+                      h("div", { key: "ts", className: "hint" }, `Opened: ${iso(p.timestamp)}`),
+                    ]),
+                    h("div", { key: "right", style: { display: "flex", alignItems: "center", gap: "8px" } }, [
+                      h("span", { key: "pnl", className: cls("badge", pnl >= 0 ? "good" : "bad") }, `${fmtMoney(pnl)} (${fmtPct(pp)})`),
+                      h("button", {
+                        key: "close",
+                        className: "btn danger",
+                        disabled: actionBusy,
+                        onClick: () => setCloseSymbolTarget(p.symbol),
+                      }, "Close"),
+                    ]),
+                  ]),
+                  h("div", { key: "rows", className: "row-grid" }, [
+                    h("div", { key: "r1", className: "row-item" }, [h("span", { className: "k" }, "Qty"), h("span", { className: "v" }, fmtNum(p.quantity, 6))]),
+                    h("div", { key: "r2", className: "row-item" }, [h("span", { className: "k" }, "Entry"), h("span", { className: "v" }, fmtNum(p.entry_price, 6))]),
+                    h("div", { key: "r3", className: "row-item" }, [h("span", { className: "k" }, "Current"), h("span", { className: "v" }, fmtNum(p.current_price, 6))]),
+                    h("div", { key: "r4", className: "row-item" }, [h("span", { className: "k" }, "Stop Loss"), h("span", { className: "v" }, fmtNum(p.stop_loss, 6))]),
+                    h("div", { key: "r5", className: "row-item" }, [h("span", { className: "k" }, "Trail Level"), h("span", { className: "v" }, fmtNum(p.trailing_stop_level, 6))]),
+                    h("div", { key: "r6", className: "row-item" }, [h("span", { className: "k" }, "Peak PnL%"), h("span", { className: "v" }, fmtPct(p.peak_pnl_percentage, 2))]),
+                    h("div", { key: "r7", className: "row-item" }, [h("span", { className: "k" }, "Native SL"), h("span", { className: "v" }, p.native_sl_active ? "ON" : "OFF")]),
+                    h("div", { key: "r8", className: "row-item" }, [h("span", { className: "k" }, "Native TP"), h("span", { className: "v" }, p.native_tp_active ? "ON" : "OFF")]),
+                  ]),
+                ]);
+              })
+            ) : h("div", { className: "empty" }, "No open positions."),
+          ]),
+
+          h("div", { key: "trades", className: "panel" }, [
+            h("div", { key: "head", className: "section-title" }, [
+              h("span", { key: "t" }, `Recent Trades (${trades.length})`),
+              h("button", {
+                key: "more",
+                className: "btn",
+                onClick: () => setTradesLimit((v) => v + 50),
+              }, "Load more (+50)"),
+            ]),
+            trades.length ? h("div", { className: "table-wrap" },
+              h("table", null, [
+                h("thead", { key: "th" }, h("tr", null, [
+                  h("th", { key: "t" }, "Time"),
+                  h("th", { key: "s" }, "Symbol"),
+                  h("th", { key: "sd" }, "Side"),
+                  h("th", { key: "q" }, "Qty"),
+                  h("th", { key: "e" }, "Entry"),
+                  h("th", { key: "x" }, "Exit"),
+                  h("th", { key: "p" }, "PnL"),
+                  h("th", { key: "pp" }, "PnL%"),
+                  h("th", { key: "r" }, "Reason"),
+                ])),
+                h("tbody", { key: "tb" }, trades.map((t, i) => {
+                  const reason = String(t.close_reason || t.reason || t.exit_reason || "unknown");
+                  const reasonKey = reason.toLowerCase();
+                  const badgeType = reasonKey === "trailing_stop"
+                    ? "good"
+                    : reasonKey === "stop_loss" || reasonKey === "kill_switch"
+                      ? "bad"
+                      : reasonKey === "time_exit"
+                        ? "mode-unknown"
+                        : reasonKey === "partial_exit_complete"
+                          ? "info"
+                          : reasonKey === "manual_close"
+                            ? "warn"
+                            : "mode-unknown";
+                  const reasonLabel = reasonKey === "kill_switch" ? "KILL" : reason;
+                  const pnl = Number(t.pnl || 0);
+                  return h("tr", { key: `${t.id || i}` }, [
+                    h("td", { key: "t" }, iso(t.close_time || t.open_time)),
+                    h("td", { key: "s" }, t.symbol || "-"),
+                    h("td", { key: "sd" }, String(t.side || "").toUpperCase() || "-"),
+                    h("td", { key: "q" }, fmtNum(t.quantity, 6)),
+                    h("td", { key: "e" }, fmtNum(t.entry_price, 6)),
+                    h("td", { key: "x" }, fmtNum(t.exit_price, 6)),
+                    h("td", { key: "p", style: { color: pnl >= 0 ? "var(--good)" : "var(--bad)", fontWeight: 700 } }, fmtMoney(pnl)),
+                    h("td", { key: "pp" }, fmtPct(t.pnl_percentage)),
+                    h("td", { key: "r" }, h("span", { className: cls("badge", badgeType) }, reasonLabel)),
+                  ]);
+                })),
+              ])
+            ) : h("div", { className: "empty" }, "No closed trades yet."),
+          ]),
+        ]) : null,
+
+        tab === "control" ? h(React.Fragment, { key: "ctrlpanel" }, [
+          h("div", { key: "grid", className: "control-grid" }, [
+            h("div", { key: "left", className: "panel" }, [
+              h("div", { key: "h", className: "section-title" }, "Entry Toggle"),
+              h("div", { key: "row", className: "ctrl-row" }, [
+                h("div", { key: "txt" }, [
+                  h("div", { key: "main", style: { fontWeight: 700 } }, status?.manual_entry_paused ? "Entry Paused" : "Entry Active"),
+                  h("div", { key: "sub", className: "hint" }, "Toggle bot entry processing pause/resume"),
+                ]),
+                h("button", {
+                  key: "btn",
+                  className: cls("btn", status?.manual_entry_paused ? "primary" : "warning"),
+                  disabled: actionBusy,
+                  onClick: () => doControl(status?.manual_entry_paused ? "resume" : "pause"),
+                }, status?.manual_entry_paused ? "Resume" : "Pause"),
+              ]),
+
+              h("div", { key: "h2", className: "section-title", style: { marginTop: "14px" } }, "Global Controls"),
+              h("div", { key: "g1", className: "ctrl-row" }, [
+                h("div", { key: "txt" }, [h("div", { style: { fontWeight: 700 } }, "Close All Positions"), h("div", { className: "hint" }, "Queues close_all for all open symbols")]),
+                h("button", { key: "btn", className: "btn danger", disabled: actionBusy, onClick: () => setShowCloseAllModal(true) }, "Close All"),
+              ]),
+              h("div", { key: "g2", className: "ctrl-row" }, [
+                h("div", { key: "txt" }, [h("div", { style: { fontWeight: 700 } }, "Kill Switch"), h("div", { className: "hint" }, "High-impact emergency stop action")]),
+                h("button", { key: "btn", className: "btn danger", disabled: actionBusy, onClick: () => setShowKillStepOne(true) }, "KILL SWITCH - Halt bot immediately"),
+              ]),
+            ]),
+
+            h("div", { key: "right", className: "panel" }, [
+              h("div", { key: "h", className: "section-title" }, `Position Controls (${positions.length})`),
+              positions.length ? positions.map((p, idx) => h("div", { key: `${p.symbol}-${idx}`, className: "ctrl-row" }, [
+                h("div", { key: "txt" }, [
+                  h("div", { key: "s", style: { fontWeight: 700 } }, `${p.symbol || "-"} ${String(p.side || "").toUpperCase()}`),
+                  h("div", { key: "m", className: "hint" }, `PnL ${fmtMoney(p.pnl)} (${fmtPct(p.pnl_percentage)})`),
+                ]),
+                h("button", {
+                  key: "btn",
+                  className: "btn danger",
+                  disabled: actionBusy,
+                  onClick: () => setCloseSymbolTarget(p.symbol),
+                }, "Close"),
+              ])) : h("div", { className: "empty" }, "No positions available to close."),
+            ]),
+          ]),
+        ]) : null,
+
+        tab === "settings" ? h("div", { key: "setpanel", className: "panel" }, [
+          settingsLoading ? h("div", { className: "hint" }, "Loading settings...") : null,
+          settingsError ? h("div", { className: "error-banner" }, settingsError) : null,
+          settingsInfo ? h("div", { className: "pending" }, settingsInfo) : null,
+          settingsDirty ? h("div", { className: "unsaved" }, "You have unsaved changes.") : null,
+
+          settingsLoaded ? h(React.Fragment, null, [
+            h("div", { key: "paths", className: "hint", style: { marginBottom: "10px" } }, [
+              `ENV: ${settingsBaseline.files.env_file || "-"} | `,
+              `Leverage: ${settingsBaseline.files.leverage_file || "-"}`,
+            ]),
+
+            h("div", { key: "envTitle", className: "section-title" }, "Environment Settings"),
+
+            [
+              {
+                title: "Runtime",
+                keys: Object.keys(envState).filter((k) => /^(BOT_MODE|ARIBOT_DB|ARIBOT_JSONL|INITIAL_BALANCE|ARIBOT_)/i.test(k)),
+              },
+              {
+                title: "Risk",
+                keys: Object.keys(envState).filter((k) => /^(ENTRY_RISK_PCT|ATR_VOLATILITY_CUTOFF|ATR_SIZE_SCALAR|DAILY_DRAWDOWN_LIMIT|MAX_CONSECUTIVE_LOSSES|COOLDOWN_CANDLES|RISK|ATR|REGIME|WMA)/i.test(k)),
+              },
+              {
+                title: "Position",
+                keys: Object.keys(envState).filter((k) => /^(MAX_OPEN_POSITIONS|MAX_HOLD_MINUTES|POSITION)/i.test(k)),
+              },
+              {
+                title: "Sizing & Fees",
+                keys: Object.keys(envState).filter((k) => /^(MAJOR_LEVERAGE|LARGE_ALT_LEVERAGE|MID_CAP_LEVERAGE|DEFAULT_LEVERAGE|ROUND_TRIP_FEE_RATE|SIZE|LEVERAGE)/i.test(k)),
+              },
+              {
+                title: "Market Filters",
+                keys: Object.keys(envState).filter((k) => /^(MIN_24H_VOLUME_QUOTE|MAX_TICK_AGE_SECONDS|MAX_UNCHANGED_TICK_CYCLES|MARKET|SYMBOL|PAIR|EXCHANGE|BYBIT)/i.test(k)),
+              },
+              {
+                title: "Timing",
+                keys: Object.keys(envState).filter((k) => /^(LOOP_INTERVAL_SECONDS|SIGNAL_BOUNDARY_WINDOW_SECONDS|PULSE_INTERVAL_SECONDS|LOOP_|POLL_|COOLDOWN|INTERVAL|CYCLE)/i.test(k)),
+              },
+              {
+                title: "Ops",
+                keys: Object.keys(envState).filter((k) => /^(RESTART_COMMAND|DASHBOARD_PORT|ALLOWED_ORIGIN|TELEGRAM|ALERT|API)/i.test(k)),
+              },
+              {
+                title: "Other",
+                keys: Object.keys(envState).filter((k) => !/^(BOT_MODE|ARIBOT_DB|ARIBOT_JSONL|INITIAL_BALANCE|ARIBOT_|ENTRY_RISK_PCT|ATR_VOLATILITY_CUTOFF|ATR_SIZE_SCALAR|DAILY_DRAWDOWN_LIMIT|MAX_CONSECUTIVE_LOSSES|COOLDOWN_CANDLES|RISK|ATR|REGIME|WMA|MAX_OPEN_POSITIONS|MAX_HOLD_MINUTES|POSITION|MAJOR_LEVERAGE|LARGE_ALT_LEVERAGE|MID_CAP_LEVERAGE|DEFAULT_LEVERAGE|ROUND_TRIP_FEE_RATE|SIZE|LEVERAGE|MIN_24H_VOLUME_QUOTE|MAX_TICK_AGE_SECONDS|MAX_UNCHANGED_TICK_CYCLES|MARKET|SYMBOL|PAIR|EXCHANGE|BYBIT|LOOP_INTERVAL_SECONDS|SIGNAL_BOUNDARY_WINDOW_SECONDS|PULSE_INTERVAL_SECONDS|LOOP_|POLL_|COOLDOWN|INTERVAL|CYCLE|RESTART_COMMAND|DASHBOARD_PORT|ALLOWED_ORIGIN|TELEGRAM|ALERT|API)/i.test(k)),
+              },
+            ].map((group) => h("div", { key: group.title, className: "group-block" }, [
+              h("h4", { key: "t", className: "group-title" }, `${group.title} (${group.keys.length})`),
+              group.keys.length ? h("div", { key: "grid", className: "field-grid" },
+                group.keys.sort().map((k) => h("div", { key: k, className: "field" }, [
+                  h("label", { key: "l", htmlFor: `env-${k}` }, k),
+                  h("input", {
+                    key: "i",
+                    id: `env-${k}`,
+                    value: envState[k] ?? "",
+                    onChange: (e) => setEnvState((prev) => ({ ...prev, [k]: e.target.value })),
+                  }),
+                ]))
+              ) : h("div", { key: "empty", className: "hint" }, "No fields in this group."),
+            ])),
+
+            h("div", { key: "levTitle", className: "section-title", style: { marginTop: "16px" } }, "Leverage Buckets"),
+            h("div", { key: "levSplit", className: "split" }, [
+              h("div", { key: "visual", className: "group-block" }, [
+                h("div", { key: "subh", className: "section-title" }, [
+                  h("span", null, "Visual Editor"),
+                  h("button", {
+                    className: "btn",
+                    onClick: () => {
+                      const name = prompt("New bucket name (e.g. small_cap):");
+                      if (!name) return;
+                      updateLeverageVisual((next) => {
+                        if (!next[name]) {
+                          next[name] = { leverage: Number(next.default_leverage || 1), symbols: [] };
+                        }
+                        return next;
+                      });
+                    },
+                  }, "Add Bucket"),
+                ]),
+
+                h("div", { className: "field", style: { marginBottom: "8px" } }, [
+                  h("label", null, "default_leverage"),
+                  h("input", {
+                    type: "number",
+                    step: "0.1",
+                    value: Number(leverageObj.default_leverage ?? 1),
+                    onChange: (e) => updateLeverageVisual((next) => {
+                      next.default_leverage = Number(e.target.value);
+                      return next;
+                    }),
+                  }),
+                ]),
+
+                ...Object.keys(leverageObj)
+                  .filter((k) => k !== "default_leverage")
+                  .sort()
+                  .map((bucket) => {
+                    const row = leverageObj[bucket] || { leverage: 1, symbols: [] };
+                    const symbolsCsv = Array.isArray(row.symbols) ? row.symbols.join(", ") : "";
+                    return h("div", { key: bucket, className: "group-block" }, [
+                      h("div", { className: "section-title" }, [
+                        h("strong", null, bucket),
+                        h("button", {
+                          className: "btn danger",
+                          onClick: () => updateLeverageVisual((next) => {
+                            delete next[bucket];
+                            return next;
+                          }),
+                        }, "Remove"),
+                      ]),
+                      h("div", { className: "field-grid" }, [
+                        h("div", { className: "field" }, [
+                          h("label", null, "Leverage"),
+                          h("input", {
+                            type: "number",
+                            step: "0.1",
+                            value: Number(row.leverage ?? 1),
+                            onChange: (e) => updateLeverageVisual((next) => {
+                              next[bucket].leverage = Number(e.target.value);
+                              return next;
+                            }),
+                          }),
+                        ]),
+                        h("div", { className: "field" }, [
+                          h("label", null, "Symbols (comma-separated)"),
+                          h("input", {
+                            value: symbolsCsv,
+                            onChange: (e) => updateLeverageVisual((next) => {
+                              next[bucket].symbols = e.target.value
+                                .split(",")
+                                .map((s) => s.trim())
+                                .filter(Boolean);
+                              return next;
+                            }),
+                          }),
+                        ]),
+                      ]),
+                    ]);
+                  }),
+              ]),
+
+              h("div", { key: "json", className: "group-block" }, [
+                h("div", { className: "section-title" }, "JSON Editor"),
+                h("div", { className: "field" }, [
+                  h("label", null, "Leverage JSON"),
+                  h("textarea", {
+                    value: leverageJson,
+                    onChange: (e) => onLeverageJsonChange(e.target.value),
+                  }),
+                ]),
+                leverageError ? h("div", { className: "error-banner", style: { marginTop: "8px" } }, leverageError) : h("div", { className: "hint" }, "Visual and JSON views stay synchronized when valid."),
+              ]),
+            ]),
+
+            h("div", { key: "actions", className: "footer-actions", style: { marginTop: "12px" } }, [
+              h("button", { className: "btn", disabled: settingsSaving || !settingsLoaded, onClick: () => loadSettings() }, "Reload"),
+              h("button", { className: "btn primary", disabled: !canSave, onClick: () => saveSettings(false) }, settingsSaving ? "Saving..." : "Save"),
+              canSaveRestart ? h("button", { className: "btn warning", disabled: !canSaveRestart, onClick: () => saveSettings(true) }, "Save & Restart") : null,
+            ]),
+          ]) : null,
+        ]) : null,
+
+        closeSymbolTarget ? h(Modal, {
+          key: "m-close-symbol",
+          title: `Close ${closeSymbolTarget}?`,
+          onClose: () => setCloseSymbolTarget(null),
+          actions: [
+            h("button", { key: "c", className: "btn", onClick: () => setCloseSymbolTarget(null) }, "Cancel"),
+            h("button", {
+              key: "ok",
+              className: "btn danger",
+              onClick: async () => {
+                const symbol = closeSymbolTarget;
+                setCloseSymbolTarget(null);
+                if (symbol) await doControl("close_symbol", symbol);
+              },
+            }, "Confirm Close"),
+          ],
+        }, h("p", null, `Close ${closeSymbolTarget}? This will post a close request to the bot.`)) : null,
+
+        showCloseAllModal ? h(Modal, {
+          key: "m-close-all",
+          title: "Confirm Close All",
+          onClose: () => setShowCloseAllModal(false),
+          actions: [
+            h("button", { key: "c", className: "btn", onClick: () => setShowCloseAllModal(false) }, "Cancel"),
+            h("button", {
+              key: "ok",
+              className: "btn danger",
+              onClick: async () => {
+                setShowCloseAllModal(false);
+                await doControl("close_all");
+              },
+            }, "Confirm Close All"),
+          ],
+        }, h("p", null, "This queues a close-all confirmation for every open position.")) : null,
+
+        showKillStepOne ? h(Modal, {
+          key: "m-kill-1",
+          title: "Kill Switch - Step 1",
+          onClose: () => setShowKillStepOne(false),
+          actions: [
+            h("button", { key: "c", className: "btn", onClick: () => setShowKillStepOne(false) }, "Cancel"),
+            h("button", {
+              key: "next",
+              className: "btn danger",
+              onClick: () => {
+                setShowKillStepOne(false);
+                setShowKillStepTwo(true);
+              },
+            }, "Continue"),
+          ],
+        }, h("p", null, "This action is high-impact. Proceed to typed confirmation.")) : null,
+
+        showKillStepTwo ? h(Modal, {
+          key: "m-kill-2",
+          title: "Kill Switch - Step 2",
+          onClose: () => {
+            setShowKillStepTwo(false);
+            setKillInput("");
+          },
+          actions: [
+            h("button", {
+              key: "c",
+              className: "btn",
+              onClick: () => {
+                setShowKillStepTwo(false);
+                setKillInput("");
+              },
+            }, "Cancel"),
+            h("button", {
+              key: "k",
+              className: "btn danger",
+              disabled: killInput !== "CONFIRM KILL",
+              onClick: async () => {
+                setShowKillStepTwo(false);
+                setKillInput("");
+                await doControl("kill");
+              },
+            }, "Execute Kill"),
+          ],
+        }, h(React.Fragment, null, [
+          h("p", { key: "p1" }, "Type CONFIRM KILL exactly to enable execution."),
+          h("input", {
+            key: "inp",
+            className: "field",
+            style: { width: "100%", border: "1px solid var(--border)", borderRadius: "8px", padding: "8px", background: "var(--surface)", color: "var(--text)" },
+            value: killInput,
+            onChange: (e) => setKillInput(e.target.value),
+            placeholder: "CONFIRM KILL",
+          }),
+        ])) : null,
+      ]);
+    }
+
+    createRoot(document.getElementById("root")).render(h(App));
+  </script>
+</body>
+</html>

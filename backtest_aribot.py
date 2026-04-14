@@ -807,39 +807,229 @@ def apply_run_recipe(args: argparse.Namespace) -> None:
     recipe = str(getattr(args, "recipe", "") or "").strip().lower()
     if not recipe:
         return
-    if recipe != "baseline":
-        raise ValueError(f"Unsupported recipe: {recipe}")
 
-    provided_flags = set(getattr(args, "_provided_flags", set()))
-
-    baseline_values = {
-        "signal_source": ("ohlc4", "--signal-source"),
-        "signal_wma_period": (45, "--signal-wma-period"),
-        "signal_wma_offset": (2, "--signal-wma-offset"),
-        "btc_regime_source": ("ohlc4", "--btc-regime-source"),
-        "btc_regime_wma_period": (90, "--btc-regime-wma-period"),
-        "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
-        "hard_stop_pct": (2.5, "--hard-stop-pct"),
-        "partial_levels": ("2,3,5", "--partial-levels"),
-        "partial_sizes": ("25,25,25", "--partial-sizes"),
-        "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
-        "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
-        "time_exit_hours": (40.0, "--time-exit-hours"),
-        "atr_period": (14, "--atr-period"),
-        "atr_volatility_cutoff_pct": (5.0, "--atr-volatility-cutoff-pct"),
-        "atr_size_scalar": (0.5, "--atr-size-scalar"),
-        "macd_fast": (2, "--macd-fast"),
-        "macd_slow": (39, "--macd-slow"),
-        "macd_signal": (6, "--macd-signal"),
-        "stoch_rsi_period": (14, "--stoch-rsi-period"),
-        "stoch_rsi_k": (3, "--stoch-rsi-k"),
-        "stoch_rsi_d": (3, "--stoch-rsi-d"),
+    _RECIPE_DEFAULTS = {
+        "baseline": {
+            "signal_source": ("ohlc4", "--signal-source"),
+            "signal_wma_period": (45, "--signal-wma-period"),
+            "signal_wma_offset": (2, "--signal-wma-offset"),
+            "btc_regime_source": ("ohlc4", "--btc-regime-source"),
+            "btc_regime_wma_period": (90, "--btc-regime-wma-period"),
+            "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+            "hard_stop_pct": (2.5, "--hard-stop-pct"),
+            "partial_levels": ("2,3,5", "--partial-levels"),
+            "partial_sizes": ("25,25,25", "--partial-sizes"),
+            "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+            "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+            "time_exit_hours": (40.0, "--time-exit-hours"),
+            "atr_period": (14, "--atr-period"),
+            "atr_volatility_cutoff_pct": (5.0, "--atr-volatility-cutoff-pct"),
+            "atr_size_scalar": (0.5, "--atr-size-scalar"),
+            "macd_fast": (2, "--macd-fast"),
+            "macd_slow": (39, "--macd-slow"),
+            "macd_signal": (6, "--macd-signal"),
+            "stoch_rsi_period": (14, "--stoch-rsi-period"),
+            "stoch_rsi_k": (3, "--stoch-rsi-k"),
+            "stoch_rsi_d": (3, "--stoch-rsi-d"),
+        },
+        # sig_smoother|reg_faster|stop_2p5|px_baseline|trail_baseline|time_40h|
+        # risk_conservative|macd_2_39_6|srsi_10_3_3
+        "r462": {
+            "signal_source": ("hlc3", "--signal-source"),
+            "signal_wma_period": (50, "--signal-wma-period"),
+            "signal_wma_offset": (2, "--signal-wma-offset"),
+            "btc_regime_source": ("hlc3", "--btc-regime-source"),
+            "btc_regime_wma_period": (72, "--btc-regime-wma-period"),
+            "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+            "hard_stop_pct": (2.5, "--hard-stop-pct"),
+            "partial_levels": ("2,3,5", "--partial-levels"),
+            "partial_sizes": ("25,25,25", "--partial-sizes"),
+            "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+            "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+            "time_exit_hours": (40.0, "--time-exit-hours"),
+            "atr_period": (14, "--atr-period"),
+            "atr_volatility_cutoff_pct": (4.0, "--atr-volatility-cutoff-pct"),
+            "atr_size_scalar": (0.4, "--atr-size-scalar"),
+            "major_leverage": (4.0, "--major-leverage"),
+            "large_alt_leverage": (2.5, "--large-alt-leverage"),
+            "mid_cap_leverage": (1.8, "--mid-cap-leverage"),
+            "default_leverage": (1.0, "--default-leverage"),
+            "macd_fast": (2, "--macd-fast"),
+            "macd_slow": (39, "--macd-slow"),
+            "macd_signal": (6, "--macd-signal"),
+            "stoch_rsi_period": (10, "--stoch-rsi-period"),
+            "stoch_rsi_k": (3, "--stoch-rsi-k"),
+            "stoch_rsi_d": (3, "--stoch-rsi-d"),
+            "confirm_macd": (True, "--confirm-macd"),
+            "confirm_stoch_rsi": (True, "--confirm-stoch-rsi"),
+        },
+        # sig_smoother|reg_faster|stop_2p5|px_baseline|trail_baseline|time_40h|
+        # risk_baseline|macd_2_39_6|srsi_10_3_3
+        "r458": {
+            "signal_source": ("hlc3", "--signal-source"),
+            "signal_wma_period": (50, "--signal-wma-period"),
+            "signal_wma_offset": (2, "--signal-wma-offset"),
+            "btc_regime_source": ("hlc3", "--btc-regime-source"),
+            "btc_regime_wma_period": (72, "--btc-regime-wma-period"),
+            "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+            "hard_stop_pct": (2.5, "--hard-stop-pct"),
+            "partial_levels": ("2,3,5", "--partial-levels"),
+            "partial_sizes": ("25,25,25", "--partial-sizes"),
+            "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+            "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+            "time_exit_hours": (40.0, "--time-exit-hours"),
+            "atr_period": (14, "--atr-period"),
+            "atr_volatility_cutoff_pct": (5.0, "--atr-volatility-cutoff-pct"),
+            "atr_size_scalar": (0.5, "--atr-size-scalar"),
+            "major_leverage": (5.0, "--major-leverage"),
+            "large_alt_leverage": (3.0, "--large-alt-leverage"),
+            "mid_cap_leverage": (2.0, "--mid-cap-leverage"),
+            "default_leverage": (1.0, "--default-leverage"),
+            "macd_fast": (2, "--macd-fast"),
+            "macd_slow": (39, "--macd-slow"),
+            "macd_signal": (6, "--macd-signal"),
+            "stoch_rsi_period": (10, "--stoch-rsi-period"),
+            "stoch_rsi_k": (3, "--stoch-rsi-k"),
+            "stoch_rsi_d": (3, "--stoch-rsi-d"),
+            "confirm_macd": (True, "--confirm-macd"),
+            "confirm_stoch_rsi": (True, "--confirm-stoch-rsi"),
+        },
+        # sig_smoother|reg_faster|stop_2p5|px_baseline|trail_baseline|time_32h|
+        # risk_conservative|macd_2_39_6|srsi_10_3_3
+        "r454": {
+            "signal_source": ("hlc3", "--signal-source"),
+            "signal_wma_period": (50, "--signal-wma-period"),
+            "signal_wma_offset": (2, "--signal-wma-offset"),
+            "btc_regime_source": ("hlc3", "--btc-regime-source"),
+            "btc_regime_wma_period": (72, "--btc-regime-wma-period"),
+            "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+            "hard_stop_pct": (2.5, "--hard-stop-pct"),
+            "partial_levels": ("2,3,5", "--partial-levels"),
+            "partial_sizes": ("25,25,25", "--partial-sizes"),
+            "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+            "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+            "time_exit_hours": (32.0, "--time-exit-hours"),
+            "atr_period": (14, "--atr-period"),
+            "atr_volatility_cutoff_pct": (4.0, "--atr-volatility-cutoff-pct"),
+            "atr_size_scalar": (0.4, "--atr-size-scalar"),
+            "major_leverage": (4.0, "--major-leverage"),
+            "large_alt_leverage": (2.5, "--large-alt-leverage"),
+            "mid_cap_leverage": (1.8, "--mid-cap-leverage"),
+            "default_leverage": (1.0, "--default-leverage"),
+            "macd_fast": (2, "--macd-fast"),
+            "macd_slow": (39, "--macd-slow"),
+            "macd_signal": (6, "--macd-signal"),
+            "stoch_rsi_period": (10, "--stoch-rsi-period"),
+            "stoch_rsi_k": (3, "--stoch-rsi-k"),
+            "stoch_rsi_d": (3, "--stoch-rsi-d"),
+            "confirm_macd": (True, "--confirm-macd"),
+            "confirm_stoch_rsi": (True, "--confirm-stoch-rsi"),
+        },
+        # sig_smoother|reg_faster|stop_2p5|px_baseline|trail_baseline|time_32h|
+        # risk_conservative|macd_3_34_5|srsi_10_3_3
+        "r456": {
+            "signal_source": ("hlc3", "--signal-source"),
+            "signal_wma_period": (50, "--signal-wma-period"),
+            "signal_wma_offset": (2, "--signal-wma-offset"),
+            "btc_regime_source": ("hlc3", "--btc-regime-source"),
+            "btc_regime_wma_period": (72, "--btc-regime-wma-period"),
+            "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+            "hard_stop_pct": (2.5, "--hard-stop-pct"),
+            "partial_levels": ("2,3,5", "--partial-levels"),
+            "partial_sizes": ("25,25,25", "--partial-sizes"),
+            "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+            "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+            "time_exit_hours": (32.0, "--time-exit-hours"),
+            "atr_period": (14, "--atr-period"),
+            "atr_volatility_cutoff_pct": (4.0, "--atr-volatility-cutoff-pct"),
+            "atr_size_scalar": (0.4, "--atr-size-scalar"),
+            "major_leverage": (4.0, "--major-leverage"),
+            "large_alt_leverage": (2.5, "--large-alt-leverage"),
+            "mid_cap_leverage": (1.8, "--mid-cap-leverage"),
+            "default_leverage": (1.0, "--default-leverage"),
+            "macd_fast": (3, "--macd-fast"),
+            "macd_slow": (34, "--macd-slow"),
+            "macd_signal": (5, "--macd-signal"),
+            "stoch_rsi_period": (10, "--stoch-rsi-period"),
+            "stoch_rsi_k": (3, "--stoch-rsi-k"),
+            "stoch_rsi_d": (3, "--stoch-rsi-d"),
+            "confirm_macd": (True, "--confirm-macd"),
+            "confirm_stoch_rsi": (True, "--confirm-stoch-rsi"),
+        },
+        # sig_smoother|reg_baseline|stop_2p5|px_baseline|trail_baseline|time_40h|
+        # risk_conservative|macd_2_39_6|srsi_10_3_3
+        "r334": {
+            "signal_source": ("hlc3", "--signal-source"),
+            "signal_wma_period": (50, "--signal-wma-period"),
+            "signal_wma_offset": (2, "--signal-wma-offset"),
+            "btc_regime_source": ("ohlc4", "--btc-regime-source"),
+            "btc_regime_wma_period": (90, "--btc-regime-wma-period"),
+            "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+            "hard_stop_pct": (2.5, "--hard-stop-pct"),
+            "partial_levels": ("2,3,5", "--partial-levels"),
+            "partial_sizes": ("25,25,25", "--partial-sizes"),
+            "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+            "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+            "time_exit_hours": (40.0, "--time-exit-hours"),
+            "atr_period": (14, "--atr-period"),
+            "atr_volatility_cutoff_pct": (4.0, "--atr-volatility-cutoff-pct"),
+            "atr_size_scalar": (0.4, "--atr-size-scalar"),
+            "major_leverage": (4.0, "--major-leverage"),
+            "large_alt_leverage": (2.5, "--large-alt-leverage"),
+            "mid_cap_leverage": (1.8, "--mid-cap-leverage"),
+            "default_leverage": (1.0, "--default-leverage"),
+            "macd_fast": (2, "--macd-fast"),
+            "macd_slow": (39, "--macd-slow"),
+            "macd_signal": (6, "--macd-signal"),
+            "stoch_rsi_period": (10, "--stoch-rsi-period"),
+            "stoch_rsi_k": (3, "--stoch-rsi-k"),
+            "stoch_rsi_d": (3, "--stoch-rsi-d"),
+            "confirm_macd": (True, "--confirm-macd"),
+            "confirm_stoch_rsi": (True, "--confirm-stoch-rsi"),
+        },
+        # sig_smoother|reg_faster|stop_2p5|px_baseline|trail_baseline|time_40h|
+        # risk_conservative|macd_3_34_5|srsi_10_3_3
+        "r464": {
+            "signal_source": ("hlc3", "--signal-source"),
+            "signal_wma_period": (50, "--signal-wma-period"),
+            "signal_wma_offset": (2, "--signal-wma-offset"),
+            "btc_regime_source": ("hlc3", "--btc-regime-source"),
+            "btc_regime_wma_period": (72, "--btc-regime-wma-period"),
+            "btc_regime_wma_offset": (0, "--btc-regime-wma-offset"),
+            "hard_stop_pct": (2.5, "--hard-stop-pct"),
+            "partial_levels": ("2,3,5", "--partial-levels"),
+            "partial_sizes": ("25,25,25", "--partial-sizes"),
+            "trailing_activation_pct": (2.0, "--trailing-activation-pct"),
+            "trailing_callback_pct": (1.5, "--trailing-callback-pct"),
+            "time_exit_hours": (40.0, "--time-exit-hours"),
+            "atr_period": (14, "--atr-period"),
+            "atr_volatility_cutoff_pct": (4.0, "--atr-volatility-cutoff-pct"),
+            "atr_size_scalar": (0.4, "--atr-size-scalar"),
+            "major_leverage": (4.0, "--major-leverage"),
+            "large_alt_leverage": (2.5, "--large-alt-leverage"),
+            "mid_cap_leverage": (1.8, "--mid-cap-leverage"),
+            "default_leverage": (1.0, "--default-leverage"),
+            "macd_fast": (3, "--macd-fast"),
+            "macd_slow": (34, "--macd-slow"),
+            "macd_signal": (5, "--macd-signal"),
+            "stoch_rsi_period": (10, "--stoch-rsi-period"),
+            "stoch_rsi_k": (3, "--stoch-rsi-k"),
+            "stoch_rsi_d": (3, "--stoch-rsi-d"),
+            "confirm_macd": (True, "--confirm-macd"),
+            "confirm_stoch_rsi": (True, "--confirm-stoch-rsi"),
+        },
     }
 
-    for field_name, (baseline_value, controlling_flag) in baseline_values.items():
+    if recipe not in _RECIPE_DEFAULTS:
+        raise ValueError(f"Unsupported recipe: {recipe!r}. Available: {sorted(_RECIPE_DEFAULTS)}")
+
+    provided_flags = set(getattr(args, "_provided_flags", set()))
+    recipe_values = _RECIPE_DEFAULTS[recipe]
+
+    for field_name, (default_value, controlling_flag) in recipe_values.items():
         if controlling_flag in provided_flags:
             continue
-        setattr(args, field_name, baseline_value)
+        setattr(args, field_name, default_value)
 
 
 def calculate_wma_at(source_prices: List[float], idx: int, period: int = 45, offset: int = 2) -> Optional[float]:
@@ -2061,7 +2251,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p_backfill.add_argument("--leverage-config", default="leverage_buckets.json", help="Leverage bucket JSON path")
 
     p_run = sub.add_parser("run", help="Run deterministic backtest from local DB")
-    p_run.add_argument("--recipe", choices=["baseline"], default="", help="Apply a preset strategy recipe")
+    p_run.add_argument("--recipe", choices=["baseline", "v1", "r334", "r454", "r456", "r458", "r462", "r464"], default="", help="Apply a preset strategy recipe")
     p_run.add_argument("--db", default="aribot_backtest.db", help="SQLite DB path")
     p_run.add_argument("--category", default="linear", help="Bybit category")
     p_run.add_argument("--interval", default=DEFAULT_INTERVAL, help="Bybit interval")

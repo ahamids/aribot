@@ -16,6 +16,10 @@ class PluginExecutionContext:
         self.plugins = plugins
 
     def trade_symbols(self) -> list[str]:
+        configured = list(getattr(self.bot, "trade_symbols", []) or [])
+        if configured:
+            return configured
+
         exchange = getattr(self.plugins, "exchange", None)
         if exchange is not None and hasattr(exchange, "list_symbols"):
             try:

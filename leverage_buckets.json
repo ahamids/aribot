@@ -1,6 +1,6 @@
 {
   "major": {
-    "leverage": 5,
+    "leverage": 4,
     "symbols": [
       "BTC",
       "ETH"
@@ -33,7 +33,7 @@
     ]
   },
   "mid_cap": {
-    "leverage": 3,
+    "leverage": 4,
     "symbols": [
       "1000BONK",
       "AAVE",
@@ -76,5 +76,5 @@
       "ZRO"
     ]
   },
-  "default_leverage": 2
+  "default_leverage": 4
 }
