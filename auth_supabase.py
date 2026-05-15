@@ -198,6 +198,40 @@ def make_require_user_jwt_only(
     return _require_user_jwt
 
 
+def make_require_user_legacy_only(
+    legacy_token: Optional[str],
+) -> Callable[..., AuthUser]:
+    """Single-tenant fallback dependency. Used when the sidecar runs with
+    `--legacy-single-user` and no Supabase verifier is configured.
+
+    Returns the legacy sentinel `AuthUser(id=LEGACY_OPS_ID, role='ops')` when
+    the bearer token matches `legacy_token` (constant-time compare). Raises
+    503 if `legacy_token` is None (refuse to authenticate without a configured
+    secret), 401 otherwise.
+
+    Endpoint bodies that branch on `user.is_legacy` continue to work
+    uniformly because this dependency returns the same `AuthUser` shape as
+    `make_require_user`.
+    """
+
+    def _require_user_legacy(
+        authorization: Optional[str] = Header(default=None),
+    ) -> AuthUser:
+        if not legacy_token:
+            raise HTTPException(
+                status_code=503,
+                detail="ARIBOT_API_TOKEN not configured; cannot authenticate in legacy mode",
+            )
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="missing bearer token")
+        token = authorization[len("Bearer ") :].strip()
+        if not hmac.compare_digest(token, legacy_token):
+            raise HTTPException(status_code=401, detail="invalid bearer token")
+        return AuthUser(id=LEGACY_OPS_ID, email="", role="ops")
+
+    return _require_user_legacy
+
+
 if __name__ == "__main__":
     # Smoke test: round-trip a JWT through the verifier with a known secret.
     import time

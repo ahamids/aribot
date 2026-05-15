@@ -36,7 +36,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Callable, Dict, Iterable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status as http_status
 from fastapi.responses import JSONResponse
@@ -49,10 +49,24 @@ except ImportError as exc:
         "status_server requires psutil. Install with: pip install -r requirements-status-server.txt"
     ) from exc
 
-from auth_supabase import LEGACY_OPS_ID
+from auth_supabase import (
+    AuthUser,
+    LEGACY_OPS_ID,
+    SupabaseJwtVerifier,
+    make_require_user,
+    make_require_user_jwt_only,
+    make_require_user_legacy_only,
+)
 from bot_keypair import HostIdentity, get_or_create_identity
 from credential_pipe import CredentialServer
 from credential_store import CredentialStore
+from meta_db import MetaDb
+from tenant_registry import (
+    BotProcessHandle,
+    InvalidTenantId,
+    TenantPaths,
+    TenantRegistry,
+)
 from tls_cert import TlsArtifacts, ensure_tls
 
 
@@ -230,9 +244,12 @@ def derive_status(snapshot: Optional[dict], cfg: Config, now_utc: datetime.datet
     return "running", None
 
 
-def _read_snapshot(cfg: Config) -> Optional[dict]:
+def _read_snapshot_at(snapshot_path: Path) -> Optional[dict]:
+    """Read the bot's status snapshot JSON at `snapshot_path`. Returns None
+    on missing file, OS error, or invalid JSON. Used by both legacy
+    (cfg.snapshot_path) and tenant (ctx.paths.status) code paths."""
     try:
-        raw = cfg.snapshot_path.read_text(encoding="utf-8-sig")
+        raw = snapshot_path.read_text(encoding="utf-8-sig")
     except (FileNotFoundError, OSError):
         return None
     try:
@@ -242,12 +259,22 @@ def _read_snapshot(cfg: Config) -> Optional[dict]:
         return None
 
 
-def _resolve_db_path(cfg: Config) -> Path:
-    """Pick the right sqlite file. The bot now uses mode-specific db files
-    (usdt_bot_v2.{paper,shadow,live}.db) and writes the resolved path to its
-    snapshot. Prefer that — it's the source of truth for "the file the bot
-    currently has open." Fall back to cfg.db_path for backward compat (e.g.
-    when the snapshot file doesn't exist yet on a fresh install).
+def _read_snapshot(cfg: Config) -> Optional[dict]:
+    """Legacy single-tenant snapshot reader. Callers in tenant mode use
+    `_read_snapshot_at(ctx.paths.status)` directly."""
+    return _read_snapshot_at(cfg.snapshot_path)
+
+
+def _resolve_legacy_db_path(cfg: Config) -> Path:
+    """Pick the right sqlite file in legacy single-tenant mode. The bot
+    writes the resolved path to its snapshot (`db_file` field). Prefer that
+    — it's the source of truth for "the file the bot currently has open."
+    Fall back to cfg.db_path for backward compat (e.g. fresh install with
+    no snapshot yet).
+
+    Multi-tenant callers do NOT use this helper — they call
+    `ctx.db_path()` directly, which is unambiguous from the user_id +
+    BOT_MODE.
     """
     snap = _read_snapshot(cfg)
     if snap:
@@ -261,9 +288,9 @@ def _resolve_db_path(cfg: Config) -> Path:
     return cfg.db_path
 
 
-def _open_db(cfg: Config) -> sqlite3.Connection:
-    # Read-only mode so the sidecar can never corrupt the bot's state.
-    db_path = _resolve_db_path(cfg)
+def _open_db_at(db_path: Path) -> sqlite3.Connection:
+    """Read-only sqlite3 connection at the given path. Used by both legacy
+    and tenant code paths — the only difference is who computed the path."""
     uri = f"file:{db_path.as_posix()}?mode=ro"
     db = sqlite3.connect(uri, uri=True, detect_types=sqlite3.PARSE_DECLTYPES)
     db.row_factory = sqlite3.Row
@@ -407,26 +434,62 @@ class CredentialsStatusOut(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Process control — start/stop bot
+# Tenant context + per-user resources
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _BotLock:
-    """Single-flight lock so two concurrent /start calls don't fork two bots."""
+
+@dataclass(frozen=True)
+class TenantContext:
+    """Resolved per-request tenant view: the user_id, their TenantPaths,
+    their BOT_MODE (from the per-tenant config.json), and BYBIT_TESTNET.
+
+    Built once per HTTP request via `_resolve_tenant` from the verified JWT
+    `sub`. Endpoints pass this around instead of re-reading registry state.
+    """
+
+    user_id: str
+    paths: TenantPaths
+    mode: str          # 'paper' | 'shadow' | 'live'
+    testnet: bool
+
+    def db_path(self) -> Path:
+        return self.paths.db(self.mode)
+
+
+def _resolve_tenant(registry: TenantRegistry, user_id: str) -> TenantContext:
+    """Build a TenantContext for `user_id`. Validates the user_id shape via
+    `paths_for` (raises InvalidTenantId on a bad UUID) and reads per-tenant
+    BOT_MODE / BYBIT_TESTNET from `config.json`."""
+    paths = registry.paths_for(user_id)
+    return TenantContext(
+        user_id=user_id,
+        paths=paths,
+        mode=registry.get_mode(user_id),
+        testnet=registry.get_testnet(user_id),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Process control — start/stop bot (per-tenant locking)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _PerUserBotLocks:
+    """One single-flight lock per user_id. The legacy sentinel
+    `LEGACY_OPS_ID` gets its own lock so the legacy code path retains the
+    "one bot at a time" guarantee. Two distinct tenants get distinct locks
+    and can /start in parallel."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._locks: Dict[str, threading.Lock] = {}
+        self._guard = threading.Lock()
 
-    def acquire(self, timeout: float = 1.0) -> bool:
-        return self._lock.acquire(timeout=timeout)
-
-    def release(self) -> None:
-        try:
-            self._lock.release()
-        except RuntimeError:
-            pass
+    def get(self, user_id: str) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault(user_id, threading.Lock())
 
 
-_bot_lock = _BotLock()
+_per_user_locks = _PerUserBotLocks()
 
 
 def _read_pid_file(path: Path) -> Optional[int]:
@@ -436,12 +499,12 @@ def _read_pid_file(path: Path) -> Optional[int]:
         return None
 
 
-def _running_bot_pid(cfg: Config) -> Optional[int]:
-    """Returns the PID of a running bot, or None.
+def _running_bot_pid_legacy(cfg: Config) -> Optional[int]:
+    """Returns the PID of the running legacy single-tenant bot, or None.
 
     Trusts the snapshot file first (the bot itself wrote its own PID there),
-    falls back to the sidecar's pid file. Either way, we require psutil to
-    confirm liveness so a stale PID isn't reported as alive.
+    falls back to the sidecar's pid file. Either way, psutil confirms
+    liveness so a stale PID isn't reported as alive.
     """
     snap = _read_snapshot(cfg)
     if snap:
@@ -454,10 +517,28 @@ def _running_bot_pid(cfg: Config) -> Optional[int]:
     return None
 
 
+def _running_bot_pid_tenant(ctx: TenantContext) -> Optional[int]:
+    """Returns the PID of the tenant's running bot, or None. Same logic as
+    legacy but reads from per-tenant snapshot + pid paths."""
+    snap = _read_snapshot_at(ctx.paths.status)
+    if snap:
+        pid = int(snap.get("pid", 0))
+        if pid and _pid_alive(pid):
+            return pid
+    file_pid = _read_pid_file(ctx.paths.pid)
+    if file_pid and _pid_alive(file_pid):
+        return file_pid
+    return None
+
+
 def _read_bot_mode(cfg: Config) -> str:
-    """Reads BOT_MODE from .env. Returns lower-case 'paper' on any read
-    failure — the bot itself would do the same, and PAPER is the safe
-    default for credential-gating decisions."""
+    """Reads BOT_MODE from .env (legacy single-tenant only). Returns
+    lower-case 'paper' on any read failure — the bot itself would do the
+    same, and PAPER is the safe default for credential-gating decisions.
+
+    Multi-tenant callers use `registry.get_mode(user_id)` instead, which
+    reads from the per-tenant config.json.
+    """
     try:
         text = cfg.env_file_path.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
@@ -475,35 +556,74 @@ def _read_bot_mode(cfg: Config) -> str:
     return "paper"
 
 
-def start_bot(cfg: Config, credential_store: CredentialStore) -> tuple[bool, str, Optional[int]]:
-    if not _bot_lock.acquire(timeout=1.0):
+def start_bot(
+    cfg: Config,
+    credential_store: CredentialStore,
+    user: AuthUser,
+    *,
+    registry: Optional[TenantRegistry] = None,
+    meta_db: Optional[MetaDb] = None,
+) -> tuple[bool, str, Optional[int]]:
+    """Launch the bot for the given user.
+
+    Legacy mode (`user.is_legacy`): writes to cfg.bot_pid_path and
+    cfg.bot_log_path, reads BOT_MODE from .env, uses LEGACY_OPS_ID for
+    credential lookup. Behaviour identical to pre-Phase-4.
+
+    Tenant mode: writes to ctx.paths.pid and ctx.paths.root/bot.launcher.log,
+    reads mode from registry.get_mode(user.id), uses user.id for credentials,
+    sets ARIBOT_USER_ID + ARIBOT_ARTIFACT_DIR in spawn env so the bot routes
+    every per-tenant artifact through TenantRegistry (Phase 3).
+    """
+    is_legacy = user.is_legacy
+    if not is_legacy and (registry is None or meta_db is None):
+        return False, "tenant start_bot requires registry and meta_db", None
+
+    user_id = user.id
+    ctx: Optional[TenantContext] = None
+    if not is_legacy:
+        try:
+            ctx = _resolve_tenant(registry, user_id)  # type: ignore[arg-type]
+        except InvalidTenantId as exc:
+            return False, f"invalid user_id: {exc}", None
+
+    lock = _per_user_locks.get(user_id)
+    if not lock.acquire(timeout=1.0):
         return False, "another start request is in flight", None
     try:
-        existing = _running_bot_pid(cfg)
+        if is_legacy:
+            existing = _running_bot_pid_legacy(cfg)
+            kill_path = cfg.kill_switch_path
+            bot_mode = _read_bot_mode(cfg)
+            pid_path = cfg.bot_pid_path
+            log_path = cfg.bot_log_path
+        else:
+            assert ctx is not None
+            existing = _running_bot_pid_tenant(ctx)
+            kill_path = ctx.paths.kill_switch
+            bot_mode = ctx.mode
+            pid_path = ctx.paths.pid
+            log_path = ctx.paths.root / "bot.launcher.log"
+
         if existing is not None:
             return False, f"bot already running (pid {existing})", existing
 
         # If a kill switch is still on disk, refuse to start — the operator
         # set it intentionally, the bot would just exit again immediately.
-        if cfg.kill_switch_path.exists():
+        if kill_path.exists():
             return (
                 False,
-                f"kill switch present at {cfg.kill_switch_path} — remove before starting",
+                f"kill switch present at {kill_path} — remove before starting",
                 None,
             )
 
-        # LIVE-mode credential guard. The locked-in policy is "refuse always":
-        # LIVE will not start unless iOS-pushed keys are present in the
-        # CredentialStore. PAPER/SHADOW stay permissive (current behaviour).
-        bot_mode = _read_bot_mode(cfg)
+        # LIVE-mode credential guard. LIVE refuses to start without iOS-pushed
+        # credentials FOR THIS user. PAPER/SHADOW stay permissive.
         cred_handle = None
         cred_server: Optional[CredentialServer] = None
-        # Phase 2: still single-tenant from the iOS app's perspective. The
-        # credential store now requires a user_id; we thread the legacy
-        # sentinel until Phase 4 wires per-tenant JWT routing.
-        if credential_store.is_loaded(LEGACY_OPS_ID):
+        if credential_store.is_loaded(user_id):
             cred_server = CredentialServer()
-            cred_handle = cred_server.start(credential_store.snapshot(LEGACY_OPS_ID))
+            cred_handle = cred_server.start(credential_store.snapshot(user_id))
         elif bot_mode == "live":
             return (
                 False,
@@ -514,11 +634,12 @@ def start_bot(cfg: Config, credential_store: CredentialStore) -> tuple[bool, str
 
         # Open the log file in append mode so we don't clobber prior launch logs.
         try:
-            log_fh = cfg.bot_log_path.open("ab", buffering=0)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = log_path.open("ab", buffering=0)
         except OSError as exc:
             if cred_server is not None:
                 cred_server.close()
-            return False, f"could not open log file {cfg.bot_log_path}: {exc}", None
+            return False, f"could not open log file {log_path}: {exc}", None
 
         creationflags = 0
         if sys.platform == "win32":
@@ -531,6 +652,15 @@ def start_bot(cfg: Config, credential_store: CredentialStore) -> tuple[bool, str
         if cred_handle is not None:
             spawn_env["ARIBOT_CRED_PIPE"] = cred_handle.address
             spawn_env["ARIBOT_CRED_TOKEN"] = cred_handle.token_hex
+        # Tenant routing: tell the spawned bot who it's running for. The
+        # bot's __main__ resolves all per-tenant paths from these env vars
+        # (Phase 3). In legacy mode we explicitly clear them so a stale
+        # env doesn't accidentally place files under tenants/.
+        if is_legacy:
+            spawn_env.pop("ARIBOT_USER_ID", None)
+        else:
+            spawn_env["ARIBOT_USER_ID"] = user_id
+            spawn_env["ARIBOT_ARTIFACT_DIR"] = str(cfg.artifact_dir)
 
         try:
             proc = subprocess.Popen(
@@ -550,7 +680,8 @@ def start_bot(cfg: Config, credential_store: CredentialStore) -> tuple[bool, str
             return False, f"subprocess.Popen failed: {exc}", None
 
         try:
-            cfg.bot_pid_path.write_text(str(proc.pid), encoding="utf-8")
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text(str(proc.pid), encoding="utf-8")
         except OSError:
             # Failing to write the pid file is not fatal — the snapshot the bot
             # writes will carry its own pid soon enough.
@@ -567,64 +698,164 @@ def start_bot(cfg: Config, credential_store: CredentialStore) -> tuple[bool, str
 
             threading.Thread(target=_close_after_handoff, daemon=True).start()
 
+        # Tenant-mode bookkeeping: meta.db audit trail + in-memory registry.
+        if not is_legacy and meta_db is not None and registry is not None:
+            try:
+                meta_db.ensure_tenant(user_id)
+                run_id = (
+                    f"sidecar-{proc.pid}-"
+                    f"{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}"
+                )
+                meta_db.record_run_start(user_id, run_id)
+                meta_db.record_audit(user_id, "start", {"mode": bot_mode, "pid": proc.pid})
+            except Exception as exc:  # never fail a start because of audit
+                run_id = ""
+                print(f"[status_server] meta_db record_run_start failed: {exc}", file=sys.stderr)
+            registry.remember_running(
+                BotProcessHandle(
+                    user_id=user_id,
+                    pid=proc.pid,
+                    mode_at_start=bot_mode,
+                    run_id=run_id,
+                )
+            )
+
         return True, f"bot launched (pid {proc.pid})", proc.pid
     finally:
-        _bot_lock.release()
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
 
 
-def _write_kill_switch(cfg: Config, intent: Literal["stop", "kill"]) -> Optional[str]:
-    """Atomically write the kill switch file. Returns None on success or an
+def _write_kill_switch_at(kill_path: Path, intent: Literal["stop", "kill"]) -> Optional[str]:
+    """Atomically write a kill switch file. Returns None on success or an
     error string on failure. The bot's kill detector only checks file
     presence, but the intent string is captured for forensic clarity so
     operators can tell after the fact whether the flag came from a graceful
     /stop or an emergency /kill.
     """
     try:
-        tmp = cfg.kill_switch_path.with_suffix(cfg.kill_switch_path.suffix + ".tmp")
+        kill_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = kill_path.with_suffix(kill_path.suffix + ".tmp")
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         tmp.write_text(
             f"intent: {intent}\ncreated_by: status_server\ncreated_at: {now_iso}\n",
             encoding="utf-8",
         )
-        os.replace(tmp, cfg.kill_switch_path)
+        os.replace(tmp, kill_path)
         return None
     except OSError as exc:
         return f"{type(exc).__name__}: {exc}"
 
 
-def stop_bot(cfg: Config) -> tuple[bool, str, Optional[int]]:
-    pid = _running_bot_pid(cfg)
-    err = _write_kill_switch(cfg, "stop")
+def stop_bot(
+    cfg: Config,
+    user: AuthUser,
+    *,
+    registry: Optional[TenantRegistry] = None,
+    meta_db: Optional[MetaDb] = None,
+) -> tuple[bool, str, Optional[int]]:
+    if user.is_legacy:
+        kill_path = cfg.kill_switch_path
+        pid = _running_bot_pid_legacy(cfg)
+    else:
+        if registry is None:
+            return False, "tenant stop_bot requires registry", None
+        try:
+            ctx = _resolve_tenant(registry, user.id)
+        except InvalidTenantId as exc:
+            return False, f"invalid user_id: {exc}", None
+        kill_path = ctx.paths.kill_switch
+        pid = _running_bot_pid_tenant(ctx)
+
+    err = _write_kill_switch_at(kill_path, "stop")
     if err is not None:
         return False, f"could not write kill switch: {err}", pid
+
+    if not user.is_legacy and meta_db is not None:
+        try:
+            meta_db.record_audit(user.id, "stop", {"pid": pid})
+        except Exception as exc:
+            print(f"[status_server] meta_db record_audit(stop) failed: {exc}", file=sys.stderr)
+
     if pid is None:
         return True, "kill switch written; no running bot detected", None
     return True, f"kill switch written; bot pid {pid} will exit at next cycle", pid
 
 
-def kill_bot(cfg: Config) -> tuple[bool, str, Optional[int]]:
+def kill_bot(
+    cfg: Config,
+    user: AuthUser,
+    *,
+    registry: Optional[TenantRegistry] = None,
+    meta_db: Optional[MetaDb] = None,
+) -> tuple[bool, str, Optional[int]]:
     """Trip the kill switch. Same file as stop_bot, different intent line.
     The bot's kill detector treats both the same way — it exits at the next
     cycle. The intent line lets operators distinguish in post-mortem logs.
     """
-    pid = _running_bot_pid(cfg)
-    err = _write_kill_switch(cfg, "kill")
+    if user.is_legacy:
+        kill_path = cfg.kill_switch_path
+        pid = _running_bot_pid_legacy(cfg)
+    else:
+        if registry is None:
+            return False, "tenant kill_bot requires registry", None
+        try:
+            ctx = _resolve_tenant(registry, user.id)
+        except InvalidTenantId as exc:
+            return False, f"invalid user_id: {exc}", None
+        kill_path = ctx.paths.kill_switch
+        pid = _running_bot_pid_tenant(ctx)
+
+    err = _write_kill_switch_at(kill_path, "kill")
     if err is not None:
         return False, f"could not write kill switch: {err}", pid
+
+    if not user.is_legacy and meta_db is not None:
+        try:
+            meta_db.record_audit(user.id, "kill", {"pid": pid})
+        except Exception as exc:
+            print(f"[status_server] meta_db record_audit(kill) failed: {exc}", file=sys.stderr)
+
     if pid is None:
         return True, "kill switch tripped; no running bot detected", None
     return True, f"kill switch tripped; bot pid {pid} will exit at next cycle", pid
 
 
-def clear_kill(cfg: Config) -> tuple[bool, str]:
+def clear_kill(
+    cfg: Config,
+    user: AuthUser,
+    *,
+    registry: Optional[TenantRegistry] = None,
+    meta_db: Optional[MetaDb] = None,
+) -> tuple[bool, str]:
     """Remove the kill switch flag. Returns ok=True even if the flag didn't
     exist (idempotent) — the goal is a clear state, not a removal action.
     """
+    if user.is_legacy:
+        kill_path = cfg.kill_switch_path
+    else:
+        if registry is None:
+            return False, "tenant clear_kill requires registry"
+        try:
+            ctx = _resolve_tenant(registry, user.id)
+        except InvalidTenantId as exc:
+            return False, f"invalid user_id: {exc}"
+        kill_path = ctx.paths.kill_switch
+
     try:
-        cfg.kill_switch_path.unlink(missing_ok=True)
-        return True, "kill switch cleared"
+        kill_path.unlink(missing_ok=True)
     except OSError as exc:
         return False, f"could not clear kill switch: {type(exc).__name__}: {exc}"
+
+    if not user.is_legacy and meta_db is not None:
+        try:
+            meta_db.record_audit(user.id, "clear_kill", {})
+        except Exception as exc:
+            print(f"[status_server] meta_db record_audit(clear_kill) failed: {exc}", file=sys.stderr)
+
+    return True, "kill switch cleared"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -634,25 +865,71 @@ def clear_kill(cfg: Config) -> tuple[bool, str]:
 _VALID_MODES = ("paper", "shadow", "live")
 
 
-def set_bot_mode(cfg: Config, requested_mode: str) -> tuple[bool, str, Optional[int], Optional[str]]:
-    """Update BOT_MODE in the .env file.
+def set_bot_mode(
+    cfg: Config,
+    user: AuthUser,
+    requested_mode: str,
+    *,
+    registry: Optional[TenantRegistry] = None,
+    meta_db: Optional[MetaDb] = None,
+) -> tuple[bool, str, Optional[int], Optional[str]]:
+    """Update BOT_MODE for the given user.
 
     Returns (ok, detail, running_pid, effective_mode).
 
-    Refuses if the bot is currently running (the bot reads BOT_MODE once at
-    startup, so a live change while it's running would be a silent no-op until
-    restart — confusing UX). The caller should /stop first.
+    Legacy mode (`user.is_legacy`): rewrites BOT_MODE in cfg.env_file_path
+    atomically, preserving comments + other keys. Refuses if the legacy
+    bot is currently running.
 
-    The write is atomic (tmp + os.replace) and preserves every other line in
-    .env — comments, blank lines, unrelated keys, and the quoting style of
-    other values. Only the BOT_MODE line is rewritten; if BOT_MODE wasn't
-    present, a new line is appended.
+    Tenant mode: writes the new mode to the tenant's config.json via
+    registry.set_mode(user.id, mode). Refuses if THAT user's bot is
+    currently running. Other tenants are unaffected.
+
+    Mode change while running would be a silent no-op until restart, hence
+    the running-bot refusal in both code paths.
     """
     norm = (requested_mode or "").strip().lower()
     if norm not in _VALID_MODES:
         return False, f"invalid mode '{requested_mode}'; must be one of {_VALID_MODES}", None, None
 
-    running = _running_bot_pid(cfg)
+    if user.is_legacy:
+        running = _running_bot_pid_legacy(cfg)
+        if running is not None:
+            return (
+                False,
+                f"bot is currently running (pid {running}); stop it first via POST /stop",
+                running,
+                None,
+            )
+
+        env_path = cfg.env_file_path
+        try:
+            existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        except OSError as exc:
+            return False, f"could not read {env_path}: {exc}", None, None
+
+        new_text = _rewrite_env_key(existing_text, "BOT_MODE", norm)
+
+        try:
+            tmp = env_path.with_suffix(env_path.suffix + ".tmp")
+            tmp.write_text(new_text, encoding="utf-8")
+            os.replace(tmp, env_path)
+        except OSError as exc:
+            return False, f"could not write {env_path}: {exc}", None, None
+
+        # Response uses upper-case to match the iOS Mode contract; the value
+        # we wrote to .env is lower-case (the bot reads it that way).
+        return True, f"BOT_MODE set to {norm}; bot will use it on next start", None, norm.upper()
+
+    # Tenant mode.
+    if registry is None:
+        return False, "tenant set_bot_mode requires registry", None, None
+    try:
+        ctx = _resolve_tenant(registry, user.id)
+    except InvalidTenantId as exc:
+        return False, f"invalid user_id: {exc}", None, None
+
+    running = _running_bot_pid_tenant(ctx)
     if running is not None:
         return (
             False,
@@ -661,23 +938,17 @@ def set_bot_mode(cfg: Config, requested_mode: str) -> tuple[bool, str, Optional[
             None,
         )
 
-    env_path = cfg.env_file_path
     try:
-        existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    except OSError as exc:
-        return False, f"could not read {env_path}: {exc}", None, None
+        registry.set_mode(user.id, norm)
+    except ValueError as exc:
+        return False, f"could not set mode: {exc}", None, None
 
-    new_text = _rewrite_env_key(existing_text, "BOT_MODE", norm)
+    if meta_db is not None:
+        try:
+            meta_db.record_audit(user.id, "mode_change", {"mode": norm})
+        except Exception as exc:
+            print(f"[status_server] meta_db record_audit(mode_change) failed: {exc}", file=sys.stderr)
 
-    try:
-        tmp = env_path.with_suffix(env_path.suffix + ".tmp")
-        tmp.write_text(new_text, encoding="utf-8")
-        os.replace(tmp, env_path)
-    except OSError as exc:
-        return False, f"could not write {env_path}: {exc}", None, None
-
-    # Response uses upper-case to match the iOS Mode contract; the value
-    # we wrote to .env is lower-case (the bot reads it that way).
     return True, f"BOT_MODE set to {norm}; bot will use it on next start", None, norm.upper()
 
 
@@ -728,14 +999,15 @@ def _rewrite_env_key(text: str, key: str, value: str) -> str:
 # Data queries — read-only against usdt_bot_v2.db
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _leverage_lookup(cfg: Config) -> dict[str, float]:
+def _leverage_lookup(repo_root: Path) -> dict[str, float]:
     """Read leverage_buckets.json to derive per-symbol leverage.
 
-    The bot stores leverage per-bucket (major / large_alt / mid_cap) in a JSON
-    file, not per-position in sqlite. We mirror its lookup so the iOS app can
-    show realistic leverage chips on each position card.
+    Currently a global config (every tenant shares the same buckets). Per-
+    user leverage overrides are a follow-up — the registry's per-tenant
+    config.json is the place they'd land. For now: same lookup table for
+    every endpoint, regardless of legacy or tenant mode.
     """
-    path = cfg.bot_cwd / "leverage_buckets.json"
+    path = repo_root / "leverage_buckets.json"
     if not path.exists():
         return {}
     try:
@@ -751,13 +1023,12 @@ def _leverage_lookup(cfg: Config) -> dict[str, float]:
     return mapping
 
 
-def _fetch_open_positions(cfg: Config) -> list[PositionOut]:
-    if not _resolve_db_path(cfg).exists():
+def _fetch_open_positions(db_path: Path, lev_lookup: dict[str, float]) -> list[PositionOut]:
+    if not db_path.exists():
         return []
     out: list[PositionOut] = []
-    lev_lookup = _leverage_lookup(cfg)
 
-    with _open_db(cfg) as db:
+    with _open_db_at(db_path) as db:
         rows = db.execute(
             """
             SELECT symbol, side, entry_price, quantity, timestamp,
@@ -804,7 +1075,7 @@ def _fetch_open_positions(cfg: Config) -> list[PositionOut]:
     return out
 
 
-def _compute_todays_pnl(cfg: Config) -> float:
+def _compute_todays_pnl(db_path: Path, lev_lookup: dict[str, float]) -> float:
     """Accurate today's PnL = closed-trade PnL since UTC midnight + open-position unrealized PnL.
 
     Replaces the bot's snapshot.session_pnl, which is broken across restarts
@@ -820,28 +1091,28 @@ def _compute_todays_pnl(cfg: Config) -> float:
     midnight = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
     realized = 0.0
-    for row in _fetch_closed_trades_since(cfg, midnight, limit=1000):
+    for row in _fetch_closed_trades_since(db_path, midnight, limit=1000):
         ts = _parse_iso(str(row["close_time"] or ""))
         if ts is None or ts < midnight:
             continue
         realized += float(row["pnl"] or 0.0)
 
     unrealized = 0.0
-    for p in _fetch_open_positions(cfg):
+    for p in _fetch_open_positions(db_path, lev_lookup):
         unrealized += float(p.pnl or 0.0)
 
     return realized + unrealized
 
 
-def _fetch_closed_trades_since(cfg: Config, since: datetime.datetime, limit: int = 500) -> list[sqlite3.Row]:
+def _fetch_closed_trades_since(db_path: Path, since: datetime.datetime, limit: int = 500) -> list[sqlite3.Row]:
     """Returns closed_trades rows from `since` -> now, newest first.
 
     Used by both /trades and /equity. Empty list on schema mismatch or missing
     db — never raises, so callers can render an empty UI state.
     """
-    if not _resolve_db_path(cfg).exists():
+    if not db_path.exists():
         return []
-    with _open_db(cfg) as db:
+    with _open_db_at(db_path) as db:
         try:
             return db.execute(
                 """
@@ -858,9 +1129,9 @@ def _fetch_closed_trades_since(cfg: Config, since: datetime.datetime, limit: int
             return []
 
 
-def _fetch_closed_trades(cfg: Config, since: datetime.datetime, limit: int = 500) -> list[TradeOut]:
+def _fetch_closed_trades(db_path: Path, since: datetime.datetime, limit: int = 500) -> list[TradeOut]:
     out: list[TradeOut] = []
-    rows = _fetch_closed_trades_since(cfg, since, limit=limit)
+    rows = _fetch_closed_trades_since(db_path, since, limit=limit)
     for r in rows:
         ts = _parse_iso(str(r["close_time"] or ""))
         if ts is None or ts < since:
@@ -884,7 +1155,7 @@ def _fetch_closed_trades(cfg: Config, since: datetime.datetime, limit: int = 500
     return out
 
 
-def _equity_window(cfg: Config, current_balance: float, hours: int) -> tuple[list[EquityPoint], EquityStats]:
+def _equity_window(db_path: Path, current_balance: float, hours: int) -> tuple[list[EquityPoint], EquityStats]:
     """Reconstructs equity samples + summary stats over the last `hours`.
 
     Strategy: anchor end of curve at current_balance (now), then walk backwards
@@ -897,7 +1168,7 @@ def _equity_window(cfg: Config, current_balance: float, hours: int) -> tuple[lis
     points: list[EquityPoint] = [EquityPoint(t=now_utc.isoformat(), equity=float(current_balance))]
     stats = EquityStats()
 
-    rows = _fetch_closed_trades_since(cfg, cutoff, limit=1000)
+    rows = _fetch_closed_trades_since(db_path, cutoff, limit=1000)
     if not rows:
         return points, stats
 
@@ -944,8 +1215,28 @@ def build_app(
     *,
     host_identity: HostIdentity,
     credential_store: CredentialStore,
+    registry: Optional[TenantRegistry] = None,
+    meta_db: Optional[MetaDb] = None,
+    jwt_verifier: Optional[SupabaseJwtVerifier] = None,
 ) -> FastAPI:
+    """Build the FastAPI app.
+
+    Multi-tenant mode: pass `registry`, `meta_db`, and `jwt_verifier`. Every
+    endpoint authenticates via Supabase JWT and scopes per-tenant. Legacy
+    bearer-token requests are also accepted via `cfg.expected_token` and
+    routed through the legacy single-tenant code paths (paths in `cfg`).
+
+    Legacy-only mode: pass `jwt_verifier=None`. Only the legacy bearer
+    token works. Endpoints behave exactly as pre-Phase-4. Useful for
+    `--legacy-single-user` ops fallback.
+    """
     app = FastAPI(title="Aribot status", version=VERSION, docs_url=None, redoc_url=None)
+
+    multi_tenant = jwt_verifier is not None
+    if multi_tenant and (registry is None or meta_db is None):
+        raise RuntimeError(
+            "build_app: jwt_verifier requires registry and meta_db (multi-tenant mode)"
+        )
 
     if cfg.cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -958,37 +1249,87 @@ def build_app(
             allow_credentials=False,
         )
 
-    def _check_token(authorization: Optional[str], expected: Optional[str]) -> None:
-        if not expected:
-            raise HTTPException(
-                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="ARIBOT_API_TOKEN not configured on the sidecar",
-            )
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="missing bearer token")
-        provided = authorization.removeprefix("Bearer ").strip()
-        if not hmac.compare_digest(provided, expected):
-            raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="invalid bearer token")
-
-    def require_token(authorization: Optional[str] = Header(default=None)) -> None:
-        _check_token(authorization, cfg.expected_token)
-
-    def require_vault_token(authorization: Optional[str] = Header(default=None)) -> None:
-        # If ARIBOT_API_TOKEN_VAULT is unset we fall back to expected_token
-        # during load_config, so this just adds a separate verification path
-        # callers can split later by setting the env var.
-        _check_token(authorization, cfg.expected_vault_token)
+    # ──────────────────────────────────────────────────────────────────────
+    # Auth dependencies. Two flavors:
+    #
+    #   require_user        — accepts JWT (returns AuthUser with real id)
+    #                         OR legacy bearer (returns sentinel AuthUser
+    #                         with id=LEGACY_OPS_ID). Used by every
+    #                         endpoint that is meaningful in both modes.
+    #
+    #   require_user_jwt    — accepts ONLY JWT. Used by /credentials* in
+    #                         multi-tenant mode so a leaked legacy bearer
+    #                         token cannot push or wipe a tenant's keys.
+    #                         In legacy-only mode this falls back to the
+    #                         vault token (which is the legacy bearer or
+    #                         a separate ARIBOT_API_TOKEN_VAULT).
+    # ──────────────────────────────────────────────────────────────────────
+    if multi_tenant:
+        require_user = make_require_user(
+            jwt_verifier, allow_legacy_token=cfg.expected_token  # type: ignore[arg-type]
+        )
+        require_user_jwt = make_require_user_jwt_only(jwt_verifier)  # type: ignore[arg-type]
+    else:
+        require_user = make_require_user_legacy_only(cfg.expected_token)
+        # In legacy-only mode, /credentials* uses the vault token (which
+        # falls back to expected_token when no separate vault token is set).
+        require_user_jwt = make_require_user_legacy_only(cfg.expected_vault_token)
 
     @app.get("/healthz")
     def healthz() -> dict:
         # Liveness for the sidecar; unauthenticated by design.
-        return {"ok": True, "version": VERSION}
+        return {"ok": True, "version": VERSION, "multiTenant": multi_tenant}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Tenant resolution helpers (closures so they can read registry).
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _tenant_db_path(user: AuthUser) -> Path:
+        if user.is_legacy:
+            return _resolve_legacy_db_path(cfg)
+        ctx = _resolve_tenant(registry, user.id)  # type: ignore[arg-type]
+        return ctx.paths.db(ctx.mode)
+
+    def _tenant_snapshot(user: AuthUser) -> Optional[dict]:
+        if user.is_legacy:
+            return _read_snapshot(cfg)
+        ctx = _resolve_tenant(registry, user.id)  # type: ignore[arg-type]
+        return _read_snapshot_at(ctx.paths.status)
+
+    def _tenant_kill_path(user: AuthUser) -> Path:
+        if user.is_legacy:
+            return cfg.kill_switch_path
+        ctx = _resolve_tenant(registry, user.id)  # type: ignore[arg-type]
+        return ctx.paths.kill_switch
+
+    def _derive_status_for(user: AuthUser, snap: Optional[dict], now_utc: datetime.datetime) -> tuple[Status, Optional[str]]:
+        kill_path = _tenant_kill_path(user)
+        if kill_path.exists():
+            return "killed", f"kill_switch_present:{kill_path.name}"
+        if snap is None:
+            return "stopped", "snapshot_missing"
+        pid = int(snap.get("pid", 0))
+        if pid and not _pid_alive(pid):
+            return "error", f"pid_dead:{pid}"
+        wrote_at = _parse_iso(str(snap.get("wrote_at", "")))
+        if wrote_at is None:
+            return "error", "snapshot_wrote_at_unparseable"
+        interval = float(snap.get("loop_interval_seconds", 60))
+        age_s = (now_utc - wrote_at).total_seconds()
+        if age_s > interval * cfg.stale_multiplier:
+            return "error", f"snapshot_stale:{age_s:.0f}s>{interval * cfg.stale_multiplier:.0f}s"
+        return "running", None
 
     @app.get("/status", response_model=StatusOut)
-    def get_status(_: None = Depends(require_token)) -> StatusOut:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        snap = _read_snapshot(cfg)
-        st, reason = derive_status(snap, cfg, now_utc)
+    def get_status(user: AuthUser = Depends(require_user)) -> StatusOut:
+        try:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            snap = _tenant_snapshot(user)
+            st, reason = _derive_status_for(user, snap, now_utc)
+            db_path = _tenant_db_path(user)
+            lev = _leverage_lookup(cfg.bot_cwd)
+        except InvalidTenantId as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
         if snap is None:
             return StatusOut(
@@ -1011,11 +1352,7 @@ def build_app(
             lastCycleIso=str(snap.get("last_cycle_iso") or snap.get("wrote_at") or now_utc.isoformat()),
             openPositions=int(snap.get("open_positions", 0)),
             currentBalance=float(snap.get("current_balance", 0.0)),
-            # Computed sidecar-side, NOT from snapshot.session_pnl — see
-            # _compute_todays_pnl for the why. The snapshot field is left in
-            # place for other consumers (telegram), but the iOS app gets the
-            # accurate computation.
-            todaysPnl=_compute_todays_pnl(cfg),
+            todaysPnl=_compute_todays_pnl(db_path, lev),
             testnet=bool(snap.get("testnet", False)),
             cycleCount=int(snap.get("cycle_count", 0)),
             runId=str(snap.get("run_id", "")),
@@ -1023,23 +1360,32 @@ def build_app(
         )
 
     @app.get("/positions", response_model=PositionsOut)
-    def get_positions(_: None = Depends(require_token)) -> PositionsOut:
-        positions = _fetch_open_positions(cfg)
+    def get_positions(user: AuthUser = Depends(require_user)) -> PositionsOut:
+        try:
+            db_path = _tenant_db_path(user)
+        except InvalidTenantId as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        lev = _leverage_lookup(cfg.bot_cwd)
+        positions = _fetch_open_positions(db_path, lev)
         return PositionsOut(
             positions=positions,
             asOfIso=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
 
     @app.get("/equity", response_model=EquityOut)
-    def get_equity(days: int = 1, _: None = Depends(require_token)) -> EquityOut:
+    def get_equity(days: int = 1, user: AuthUser = Depends(require_user)) -> EquityOut:
         # Clamp to a sensible range so a runaway client can't ask for 10 years.
         clamped_days = max(1, min(int(days), 30))
         hours = clamped_days * 24
-        snap = _read_snapshot(cfg)
+        try:
+            snap = _tenant_snapshot(user)
+            db_path = _tenant_db_path(user)
+        except InvalidTenantId as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         bal = float(snap.get("current_balance", 0.0)) if snap else 0.0
-        # Same accurate-todays-pnl logic as /status.
-        pnl_today = _compute_todays_pnl(cfg)
-        points, stats = _equity_window(cfg, bal, hours)
+        lev = _leverage_lookup(cfg.bot_cwd)
+        pnl_today = _compute_todays_pnl(db_path, lev)
+        points, stats = _equity_window(db_path, bal, hours)
         return EquityOut(
             points=points,
             todaysPnl=pnl_today,
@@ -1048,18 +1394,24 @@ def build_app(
         )
 
     @app.get("/trades", response_model=TradesOut)
-    def get_trades(days: int = 7, _: None = Depends(require_token)) -> TradesOut:
+    def get_trades(days: int = 7, user: AuthUser = Depends(require_user)) -> TradesOut:
         clamped_days = max(1, min(int(days), 30))
         since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=clamped_days)
-        trades = _fetch_closed_trades(cfg, since, limit=500)
+        try:
+            db_path = _tenant_db_path(user)
+        except InvalidTenantId as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        trades = _fetch_closed_trades(db_path, since, limit=500)
         return TradesOut(
             trades=trades,
             asOfIso=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
 
     @app.post("/start", response_model=ControlOut)
-    def post_start(_: None = Depends(require_token)) -> JSONResponse:
-        ok, detail, pid = start_bot(cfg, credential_store)
+    def post_start(user: AuthUser = Depends(require_user)) -> JSONResponse:
+        ok, detail, pid = start_bot(
+            cfg, credential_store, user, registry=registry, meta_db=meta_db
+        )
         body = ControlOut(ok=ok, action="start", pid=pid, detail=detail).model_dump()
         # Use a clear HTTP code so the iOS app can distinguish "already running"
         # (409 Conflict) from "credentials missing for LIVE" (412 Precondition
@@ -1073,41 +1425,43 @@ def build_app(
         return JSONResponse(body, status_code=http_status.HTTP_202_ACCEPTED)
 
     @app.post("/stop", response_model=ControlOut)
-    def post_stop(_: None = Depends(require_token)) -> JSONResponse:
-        ok, detail, pid = stop_bot(cfg)
+    def post_stop(user: AuthUser = Depends(require_user)) -> JSONResponse:
+        ok, detail, pid = stop_bot(cfg, user, registry=registry, meta_db=meta_db)
         body = ControlOut(ok=ok, action="stop", pid=pid, detail=detail).model_dump()
         if not ok:
             return JSONResponse(body, status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR)
         return JSONResponse(body, status_code=http_status.HTTP_202_ACCEPTED)
 
     @app.post("/kill", response_model=ControlOut)
-    def post_kill(_: None = Depends(require_token)) -> JSONResponse:
+    def post_kill(user: AuthUser = Depends(require_user)) -> JSONResponse:
         # Semantically: emergency kill switch. Same kill_switch.flag file as
         # /stop (per locked-in scope decision), different intent line so the
         # operator can tell the two apart in post-mortem.
-        ok, detail, pid = kill_bot(cfg)
+        ok, detail, pid = kill_bot(cfg, user, registry=registry, meta_db=meta_db)
         body = ControlOut(ok=ok, action="kill", pid=pid, detail=detail).model_dump()
         if not ok:
             return JSONResponse(body, status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR)
         return JSONResponse(body, status_code=http_status.HTTP_202_ACCEPTED)
 
     @app.delete("/kill", response_model=ControlOut)
-    def delete_kill(_: None = Depends(require_token)) -> JSONResponse:
-        # Idempotent — succeeds even if the flag wasn't present. Operators
-        # can call this without first checking; the bot will start cleanly
-        # once the flag is gone.
-        ok, detail = clear_kill(cfg)
+    def delete_kill(user: AuthUser = Depends(require_user)) -> JSONResponse:
+        # Idempotent — succeeds even if the flag wasn't present.
+        ok, detail = clear_kill(cfg, user, registry=registry, meta_db=meta_db)
         body = ControlOut(ok=ok, action="clear_kill", pid=None, detail=detail).model_dump()
         if not ok:
             return JSONResponse(body, status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR)
         return JSONResponse(body, status_code=http_status.HTTP_200_OK)
 
     @app.post("/mode", response_model=ModeOut)
-    def post_mode(body: ModeBody, _: None = Depends(require_token)) -> JSONResponse:
-        ok, detail, running_pid, effective = set_bot_mode(cfg, body.mode)
+    def post_mode(
+        body: ModeBody,
+        user: AuthUser = Depends(require_user),
+    ) -> JSONResponse:
+        ok, detail, running_pid, effective = set_bot_mode(
+            cfg, user, body.mode, registry=registry, meta_db=meta_db
+        )
         out = ModeOut(ok=ok, mode=effective, detail=detail, runningPid=running_pid).model_dump()
         if not ok and running_pid is not None:
-            # Bot is running → 409 Conflict. iOS surfaces "stop bot first".
             return JSONResponse(out, status_code=http_status.HTTP_409_CONFLICT)
         if not ok:
             return JSONResponse(out, status_code=http_status.HTTP_400_BAD_REQUEST)
@@ -1120,8 +1474,8 @@ def build_app(
     @app.get("/pubkey", response_model=PubkeyOut)
     def get_pubkey() -> PubkeyOut:
         # Unauthenticated by design: iOS needs the pubkey BEFORE it can prove
-        # anything to us. The TLS pinning + TOFU fingerprint match (operator
-        # reads it off the sidecar's stdout) is the authentication path here.
+        # anything to us. TLS pinning + TOFU fingerprint match (operator reads
+        # it off the sidecar's stdout) is the authentication path here.
         return PubkeyOut(
             publicKey=host_identity.public_key_b64,
             fingerprint=host_identity.fingerprint,
@@ -1130,13 +1484,18 @@ def build_app(
     @app.post("/credentials", response_model=CredentialsAckOut)
     def post_credentials(
         body: CredentialsBody,
-        _: None = Depends(require_vault_token),
+        user: AuthUser = Depends(require_user_jwt),
     ) -> JSONResponse:
-        # Resolve current testnet flag from .env so iOS-supplied keys validate
-        # against the same Bybit environment the bot will use.
-        bybit_testnet = _read_bybit_testnet(cfg)
+        # Resolve current testnet flag from per-tenant config (or legacy .env).
+        if user.is_legacy:
+            bybit_testnet = _read_bybit_testnet(cfg)
+        else:
+            try:
+                bybit_testnet = registry.get_testnet(user.id)  # type: ignore[union-attr]
+            except InvalidTenantId as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
         result = credential_store.accept_sealed_push(
-            user_id=LEGACY_OPS_ID,
+            user_id=user.id,
             ciphertext_b64=body.ciphertext,
             nonce_b64=body.nonce,
             sender_pubkey_b64=body.senderPublicKey,
@@ -1144,14 +1503,27 @@ def build_app(
             counter=body.counter,
             bybit_testnet=bybit_testnet,
         )
+        if result.ok and not user.is_legacy and meta_db is not None:
+            try:
+                meta_db.ensure_tenant(user.id)
+                meta_db.record_audit(
+                    user.id, "creds_pushed", {"fingerprint": result.fingerprint}
+                )
+            except Exception as exc:
+                print(
+                    f"[status_server] meta_db record_audit(creds_pushed) failed: {exc}",
+                    file=sys.stderr,
+                )
         ack = CredentialsAckOut(
             ok=result.ok, detail=result.detail, fingerprint=result.fingerprint
         ).model_dump()
         return JSONResponse(ack, status_code=result.status_code)
 
     @app.get("/credentials/status", response_model=CredentialsStatusOut)
-    def get_credentials_status(_: None = Depends(require_vault_token)) -> CredentialsStatusOut:
-        st = credential_store.status(LEGACY_OPS_ID)
+    def get_credentials_status(
+        user: AuthUser = Depends(require_user_jwt),
+    ) -> CredentialsStatusOut:
+        st = credential_store.status(user.id)
         return CredentialsStatusOut(
             loaded=st.loaded,
             fingerprint=st.fingerprint,
@@ -1160,8 +1532,18 @@ def build_app(
         )
 
     @app.delete("/credentials", response_model=CredentialsAckOut)
-    def delete_credentials(_: None = Depends(require_vault_token)) -> CredentialsAckOut:
-        credential_store.clear(LEGACY_OPS_ID)
+    def delete_credentials(
+        user: AuthUser = Depends(require_user_jwt),
+    ) -> CredentialsAckOut:
+        credential_store.clear(user.id)
+        if not user.is_legacy and meta_db is not None:
+            try:
+                meta_db.record_audit(user.id, "creds_wiped", {})
+            except Exception as exc:
+                print(
+                    f"[status_server] meta_db record_audit(creds_wiped) failed: {exc}",
+                    file=sys.stderr,
+                )
         return CredentialsAckOut(ok=True, detail="credentials wiped")
 
     return app
@@ -1185,6 +1567,51 @@ def _read_bybit_testnet(cfg: Config) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sidecar startup reconciliation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _reconcile_running_bots_on_boot(
+    registry: TenantRegistry,
+    *,
+    out: Optional[Iterable[str]] = None,
+) -> int:
+    """Walk every tenant directory on disk, check for a live bot PID, and
+    rebuild the in-memory `BotProcessHandle` registry accordingly. Stale
+    pid files (PID gone) are unlinked so subsequent /status reports
+    "stopped" instead of "error pid_dead".
+
+    Called once at sidecar startup before uvicorn binds. Returns the count
+    of tenants found running (for the operator-facing log line).
+    """
+    found = 0
+    for user_id, pid in registry.iter_tenants_with_pid():
+        paths = registry.paths_for(user_id)
+        if pid is None:
+            continue
+        if _pid_alive(pid):
+            registry.remember_running(
+                BotProcessHandle(
+                    user_id=user_id,
+                    pid=pid,
+                    mode_at_start=registry.get_mode(user_id),
+                    run_id="",  # we didn't witness the launch
+                )
+            )
+            found += 1
+            print(
+                f"[status_server] reconciled running bot user={user_id[:8]}… pid={pid}",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                paths.pid.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return found
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1200,6 +1627,17 @@ def main() -> None:
         action="store_true",
         help="Disable TLS. NOT RECOMMENDED. Only for local-only test rigs.",
     )
+    parser.add_argument(
+        "--legacy-single-user",
+        action="store_true",
+        default=os.getenv("ARIBOT_LEGACY_SINGLE_USER", "").lower() in {"1", "true", "yes", "on"},
+        help=(
+            "Disable multi-tenant routing. Endpoints accept ONLY the legacy "
+            "ARIBOT_API_TOKEN bearer and operate on the single-tenant paths "
+            "in cfg. Useful as an ops fallback during the multi-tenant "
+            "migration. Will be removed in Phase 5+."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = load_config(args)
@@ -1207,9 +1645,36 @@ def main() -> None:
     if not cfg.expected_token:
         print(
             "[status_server] WARNING: ARIBOT_API_TOKEN is not set. "
-            "POST /start and POST /stop are reachable WITHOUT authentication. "
+            "Endpoints reachable WITHOUT authentication. "
             "Set ARIBOT_API_TOKEN in the environment to lock them down.",
             file=sys.stderr,
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Multi-tenant wiring. When --legacy-single-user is NOT set, require
+    # SUPABASE_URL + SUPABASE_JWT_SECRET and instantiate the multi-tenant
+    # stack (TenantRegistry + MetaDb + JWT verifier). With the flag, the
+    # sidecar runs in legacy mode (current single-tenant behavior).
+    # ──────────────────────────────────────────────────────────────────
+    registry: Optional[TenantRegistry] = None
+    meta_db: Optional[MetaDb] = None
+    jwt_verifier: Optional[SupabaseJwtVerifier] = None
+    if not args.legacy_single_user:
+        supabase_url = os.getenv("SUPABASE_URL", "").strip()
+        supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+        if not supabase_url or not supabase_jwt_secret:
+            print(
+                "[status_server] ERROR: multi-tenant mode requires "
+                "SUPABASE_URL and SUPABASE_JWT_SECRET to be set. Either set "
+                "them in the environment, or pass --legacy-single-user (or "
+                "ARIBOT_LEGACY_SINGLE_USER=1) to opt out.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        registry = TenantRegistry(cfg.artifact_dir)
+        meta_db = MetaDb(registry.meta_db_path)
+        jwt_verifier = SupabaseJwtVerifier(
+            jwt_secret=supabase_jwt_secret, supabase_url=supabase_url
         )
 
     # Generate / load the host's X25519 identity and TLS cert before the
@@ -1234,17 +1699,33 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    if registry is not None:
+        running_count = _reconcile_running_bots_on_boot(registry)
+        print(
+            f"[status_server] reconciled {running_count} running bot(s) "
+            f"across {len(registry.all_known_tenants())} known tenant(s)",
+            file=sys.stderr,
+        )
+
     scheme = "https" if tls_artifacts is not None else "http"
+    tenancy = "multi-tenant" if registry is not None else "legacy single-user"
     print(
         f"[status_server] version={VERSION} bind={scheme}://{args.host}:{args.port} "
         f"snapshot={cfg.snapshot_path} kill_switch={cfg.kill_switch_path} "
-        f"db={cfg.db_path} auth={auth_mode} "
+        f"db={cfg.db_path} auth={auth_mode} mode={tenancy} "
         f"host_pubkey_fp={host_identity.fingerprint}"
     )
 
     import uvicorn
 
-    app = build_app(cfg, host_identity=host_identity, credential_store=credential_store)
+    app = build_app(
+        cfg,
+        host_identity=host_identity,
+        credential_store=credential_store,
+        registry=registry,
+        meta_db=meta_db,
+        jwt_verifier=jwt_verifier,
+    )
     uvicorn_kwargs: dict[str, object] = dict(
         host=args.host,
         port=args.port,
