@@ -1,11 +1,13 @@
 # Multi-Tenant Migration — Status & Resume Guide
 
-> Resume document for the single-user → multi-tenant migration of Aribot.
-> When opening this repo in a fresh session, read this file first.
+> Original resume document for the single-user → multi-tenant migration of
+> Aribot. **The migration is complete as of Phase 5 (commit `4d9c488`).**
+> Kept in-repo as the canonical history of the architectural decisions and
+> phase rollout. For day-to-day operation, see [HOW_TO_RUN.md](HOW_TO_RUN.md).
 
-**Last updated:** 2026-05-15 (end of Phase 4)
-**Branch:** `feat/multi-tenant-migration`
-**Commits on branch:** `0323bfa` (baseline) → `5a7d5de` (P1) → `7e9f2ff` (resume doc) → `5da1963` (P2) → `0abd370` (status) → `8b8d7a7` (P3) → `080b8a0` (status) → `c75d665` (P4)
+**Status:** ✅ **MIGRATION COMPLETE** (2026-05-15)
+**Branch:** `feat/multi-tenant-migration` — ready for review/merge to main
+**Commits on branch:** `0323bfa` (baseline) → `5a7d5de` (P1) → `7e9f2ff` (resume doc) → `5da1963` (P2) → `0abd370` (status) → `8b8d7a7` (P3) → `080b8a0` (status) → `c75d665` (P4) → `40c9b2b` (status) → `4d9c488` (P5)
 
 ---
 
@@ -18,9 +20,9 @@
 | 2 — Per-user CredentialStore | ✅ | `5da1963` | `_current` → `_by_user` dict; loopback assertion; legacy sentinel threaded |
 | 3 — Bot `--user-id` flag | ✅ | `8b8d7a7` | Bot CLI accepts `--user-id`; all paths route through `TenantRegistry`; legacy mode preserved |
 | 4 — JWT-aware sidecar | ✅ | `c75d665` | Per-user locks, JWT auth, tenant DB resolution, meta.db audit, startup reconciliation, 8/8 isolation tests pass |
-| 5 — Decommission legacy default | ⬜ | — | Make Supabase env mandatory unless `--legacy-single-user` |
+| 5 — Decommission legacy default | ✅ | `4d9c488` | Multi-tenant is default; `--legacy-single-user` prints deprecation warning; HOW_TO_RUN.md restructured |
 
-**Behavior change to date:** zero. The sidecar, bot, and iOS app all run exactly as before Phase 1. The new modules are imported by nothing in the production path.
+**Behavior change after Phase 5:** sidecar requires `SUPABASE_URL` + `SUPABASE_JWT_SECRET` (or explicit `--legacy-single-user` opt-out with a deprecation warning). Per-user JWT auth on every endpoint; per-tenant DBs/logs/PIDs/kill switches; per-user single-flight locks; MetaDb audit trail; cross-tenant isolation verified by 8/8 test suite.
 
 **User cadence preference:** pause-and-review after every phase. Do not chain.
 
