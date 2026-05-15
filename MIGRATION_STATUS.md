@@ -3,9 +3,9 @@
 > Resume document for the single-user → multi-tenant migration of Aribot.
 > When opening this repo in a fresh session, read this file first.
 
-**Last updated:** 2026-05-15 (end of Phase 1)
+**Last updated:** 2026-05-15 (end of Phase 2)
 **Branch:** `feat/multi-tenant-migration`
-**Commits on branch:** `0323bfa` (baseline) → `5a7d5de` (Phase 1)
+**Commits on branch:** `0323bfa` (baseline) → `5a7d5de` (Phase 1) → `7e9f2ff` (resume doc) → `5da1963` (Phase 2)
 
 ---
 
@@ -15,7 +15,7 @@
 | --- | --- | --- | --- |
 | 0 — Baseline | ✅ | `0323bfa` (on `main`) | Pre-migration snapshot of single-user codebase |
 | 1 — Foundation | ✅ | `5a7d5de` | `auth_supabase.py`, `meta_db.py`, `tenant_registry.py` additions, deps, env, docs |
-| 2 — Per-user CredentialStore | ⬜ | — | Single-slot → `dict[user_id, …]`; per-launch credential pipe wiring |
+| 2 — Per-user CredentialStore | ✅ | `5da1963` | `_current` → `_by_user` dict; loopback assertion; legacy sentinel threaded |
 | 3 — Bot `--user-id` flag | ⬜ | — | Bot CLI accepts `--user-id`; all paths route through `TenantRegistry` |
 | 4 — JWT-aware sidecar | ⬜ | — | Endpoints take JWT, scope per-tenant; isolation smoke test |
 | 5 — Decommission legacy default | ⬜ | — | Make Supabase env mandatory unless `--legacy-single-user` |
@@ -69,14 +69,14 @@ These were debated in the planning conversation and locked in:
 
 | File | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 |
 | --- | --- | --- | --- | --- | --- |
-| `auth_supabase.py` (new) | ✅ created | — | — | wired into endpoints | — |
+| `auth_supabase.py` (new) | ✅ created | LEGACY_OPS_ID exported | — | wired into endpoints | — |
 | `meta_db.py` (new) | ✅ created | — | — | wired into start/stop | — |
 | `tenant_registry.py` | ✅ helpers added | — | — | used in every endpoint | — |
-| `credential_store.py` | — | **per-user dict** | — | — | — |
-| `credential_pipe.py` | — | docstring + 127.0.0.1 assertion | — | — | — |
+| `credential_store.py` | — | ✅ per-user dict | — | — | — |
+| `credential_pipe.py` | — | ✅ 127.0.0.1 assertion | — | — | — |
 | `order_executor.py` | — | — | accept `idempotency_db_path` kwarg | — | — |
 | `usdt_paper_bot_v2.py` | — | — | **`--user-id` + `TenantRegistry` path resolution** | — | — |
-| `status_server.py` | — | thread `user_id="__legacy__"` everywhere | — | **biggest refactor: per-user locks, JWT, per-tenant DB** | mandatory Supabase env |
+| `status_server.py` | — | ✅ threads `LEGACY_OPS_ID` at all 5 sites | — | **biggest refactor: per-user locks, JWT, per-tenant DB** | mandatory Supabase env |
 | `tests/test_multitenant_isolation.py` (new) | — | — | — | created | — |
 | `.env.example` | ✅ updated | — | — | — | — |
 | `HOW_TO_RUN.md` | ✅ updated | — | — | — | flip default block |
