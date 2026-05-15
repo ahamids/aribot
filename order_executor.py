@@ -1,4 +1,5 @@
 import os
+import contextlib
 import logging
 import sqlite3
 import json
@@ -63,8 +64,14 @@ class OrderExecutor:
             'apiKey': api_key,
             'secret': api_secret,
             'enableRateLimit': True,
-            'options': {'defaultType': 'future'}
+            'options': {
+                'defaultType': 'future',
+                'adjustForTimeDifference': True,
+                'recvWindow': 20000,
+            },
         })
+        with contextlib.suppress(Exception):
+            self.exchange.load_time_difference()
         self.order_status_timeout_seconds = int(os.getenv('ORDER_STATUS_TIMEOUT_SECONDS', '30'))
         self.order_status_poll_interval_seconds = float(os.getenv('ORDER_STATUS_POLL_INTERVAL_SECONDS', '1.5'))
         self.idempotency_db_path = os.getenv('ORDER_EXECUTOR_DB', 'usdt_paper_bot_v2.db')
@@ -418,6 +425,28 @@ class OrderExecutor:
     def clear_native_protection(self, symbol: str) -> Dict[str, Any]:
         """Backward-compatible alias for clearing all native stops."""
         return self.cancel_all_native_stops(symbol)
+
+    def cancel_order_by_id(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """Cancel a single resting order by id. Treats already-gone orders as success."""
+        if not order_id:
+            return {'ok': False, 'operation': 'cancel_order_by_id', 'warnings': [{'error': 'missing_order_id'}]}
+
+        if self.dry_run:
+            logger.info(f"DRY_RUN: cancel order {order_id} for {symbol}")
+            return {'ok': True, 'operation': 'cancel_order_by_id', 'warnings': []}
+
+        try:
+            self.exchange.cancel_order(order_id, symbol)
+            return {'ok': True, 'operation': 'cancel_order_by_id', 'warnings': []}
+        except ccxt.OrderNotFound:
+            return {'ok': True, 'operation': 'cancel_order_by_id', 'warnings': [{'note': 'order_not_found'}]}
+        except Exception as exc:
+            logger.warning(f"cancel_order_by_id failed for {symbol} order={order_id}: {type(exc).__name__}: {exc}")
+            return {
+                'ok': False,
+                'operation': 'cancel_order_by_id',
+                'warnings': [{'error_type': type(exc).__name__, 'error': str(exc)}],
+            }
 
     def fetch_live_position_size(self, symbol: str) -> Optional[float]:
         """Return the absolute live position contracts for symbol from the exchange.

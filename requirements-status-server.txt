@@ -1,0 +1,17 @@
+# Aribot status HTTP sidecar dependencies (status_server.py).
+# Kept separate from the trading bot's runtime deps so the bot itself stays
+# minimal. Install with:
+#     pip install -r requirements-status-server.txt
+fastapi>=0.110
+uvicorn[standard]>=0.27
+psutil>=5.9
+
+# iOS-sourced credential vault (status_server.py + bot_keypair.py + tls_cert.py):
+# - PyNaCl: X25519 sealed-box (mirrors tweetnacl on the iOS side).
+# - cryptography: generates the self-signed TLS cert presented to iOS.
+# - keyring: stores the bot's X25519 secret and TLS private key in the OS
+#   keyring (Windows Credential Manager / macOS Keychain / Linux Secret
+#   Service) so a disk-read attacker can't recover them.
+pynacl>=1.5
+cryptography>=42
+keyring>=24

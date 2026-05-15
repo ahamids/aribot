@@ -86,19 +86,36 @@ class SecretLoader:
         if secrets.bot_mode not in {"shadow", "live"}:
             return
 
-        read_perms = self._query_api_permissions(
+        self.validate_keypair_against_bybit(
             api_key=secrets.read_api_key,
             api_secret=secrets.read_api_secret,
             testnet=secrets.bybit_testnet,
+            role="read",
         )
-        trade_perms = self._query_api_permissions(
+        self.validate_keypair_against_bybit(
             api_key=secrets.trade_api_key,
             api_secret=secrets.trade_api_secret,
             testnet=secrets.bybit_testnet,
+            role="trade",
         )
 
-        self._validate_permission_profile(read_perms, role="read")
-        self._validate_permission_profile(trade_perms, role="trade")
+    def validate_keypair_against_bybit(
+        self,
+        *,
+        api_key: str,
+        api_secret: str,
+        testnet: bool,
+        role: str,
+    ) -> None:
+        """Public entry point that callers outside this module (the iOS
+        credential vault, ad-hoc tooling) use to validate a Bybit keypair
+        with identical rules to .env-loaded credentials. Raises
+        SecretValidationError on any failure.
+        """
+        permissions = self._query_api_permissions(
+            api_key=api_key, api_secret=api_secret, testnet=testnet
+        )
+        self._validate_permission_profile(permissions, role=role)
 
     @staticmethod
     def is_kill_switch_triggered(kill_switch_file: str) -> bool:

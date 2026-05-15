@@ -6,6 +6,8 @@ Runs in a loop, analyzes signals every 5 minutes, manages paper positions with a
 """
 
 import ccxt
+import argparse
+import contextlib
 import sqlite3
 import time
 import datetime
@@ -22,8 +24,110 @@ from alert_dispatcher import AlertDispatcher
 from emoji_mode import EmojiLogFilter, SafeStreamHandler, normalize_emoji_mode, parse_emoji_mode_args
 from observability import FundingTracker, KillSwitchMonitor, StructuredEventLogger
 from order_executor import OrderExecutor
-from secret_loader import SecretLoader, SecretValidationError
+from secret_loader import BotSecrets, SecretLoader, SecretValidationError
 from startup_reconciler import StartupReconciler
+
+
+def normalize_symbol_focus_entries(symbols):
+    normalized = set()
+    if symbols is None:
+        return normalized
+
+    if isinstance(symbols, str):
+        symbols = [symbols]
+
+    for symbol in symbols:
+        if not isinstance(symbol, str):
+            continue
+        candidate = symbol.strip().upper()
+        if candidate:
+            normalized.add(candidate)
+    return normalized
+
+
+def parse_symbol_focus_csv(raw_value):
+    if raw_value is None:
+        return []
+
+    values = []
+    for token in str(raw_value).split(','):
+        candidate = token.strip()
+        if candidate:
+            values.append(candidate)
+    return values
+
+
+def get_base_asset_from_market_symbol(symbol):
+    symbol_head = str(symbol or '').split(':')[0]
+    if '/' in symbol_head:
+        return symbol_head.split('/')[0].upper()
+    return symbol_head.upper()
+
+
+def filter_symbols_by_allowlist(available_symbols, requested_symbols):
+    requested = normalize_symbol_focus_entries(requested_symbols)
+    if not requested:
+        return sorted(available_symbols), set()
+
+    filtered = []
+    matched = set()
+    for symbol in available_symbols:
+        normalized_symbol = str(symbol).strip().upper()
+        base_asset = get_base_asset_from_market_symbol(symbol)
+        if normalized_symbol in requested or base_asset in requested:
+            filtered.append(symbol)
+            if normalized_symbol in requested:
+                matched.add(normalized_symbol)
+            if base_asset in requested:
+                matched.add(base_asset)
+
+    return sorted(filtered), requested - matched
+
+
+def load_symbol_focus_file(file_path):
+    path = Path(file_path)
+    with path.open('r', encoding='utf-8') as handle:
+        payload = json.load(handle)
+
+    if isinstance(payload, list):
+        return payload
+
+    if isinstance(payload, dict) and isinstance(payload.get('symbols'), list):
+        return payload['symbols']
+
+    raise ValueError('Symbol focus JSON must be either a top-level list or an object containing a symbols list')
+
+
+def parse_runtime_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description='Run Aribot with optional symbol focus controls.',
+    )
+    parser.add_argument(
+        '--symbols',
+        help='Comma-separated base assets or full market symbols to trade, e.g. BTC,ETH,SOL or BTC/USDT:USDT',
+    )
+    parser.add_argument(
+        '--symbols-file',
+        help='Path to a JSON file containing either a symbol list or an object with a symbols list',
+    )
+    return parser.parse_args(list(argv or []))
+
+
+def resolve_symbol_focus_args(args):
+    file_symbols = []
+    file_source = None
+    if getattr(args, 'symbols_file', None):
+        file_symbols = load_symbol_focus_file(args.symbols_file)
+        file_source = f"json:{Path(args.symbols_file)}"
+
+    cli_symbols = parse_symbol_focus_csv(getattr(args, 'symbols', None))
+    if cli_symbols:
+        return cli_symbols, 'cli:--symbols'
+
+    if file_symbols:
+        return file_symbols, file_source or 'json'
+
+    return [], 'all_markets'
 
 
 def derive_pnl_pct(entry_price, current_price, side):
@@ -82,6 +186,9 @@ class PaperPosition:
         self.native_trail_active = False
         self.native_sl_price = None
         self.native_stops_cancelled_at = None
+
+        # Companion limit order placed alongside the market entry.
+        self.companion_limit_order_id = None
 
     def update_price(self, current_price):
         self.current_price = current_price
@@ -173,9 +280,11 @@ class PaperPosition:
 
 
 class Aribot:
-    def __init__(self, startup_secrets=None, emoji_mode='noemojis'):
+    def __init__(self, startup_secrets=None, emoji_mode='noemojis', symbol_allowlist=None, symbol_allowlist_source='all_markets'):
         self.emoji_mode = normalize_emoji_mode(emoji_mode)
         self.setup_logging(emoji_mode=self.emoji_mode)
+        self.requested_symbol_allowlist = normalize_symbol_focus_entries(symbol_allowlist)
+        self.symbol_allowlist_source = str(symbol_allowlist_source or 'all_markets')
         self.bot_mode = str(getattr(startup_secrets, 'bot_mode', os.getenv('BOT_MODE', 'paper'))).strip().lower()
         self.live_execution_enabled = self.bot_mode in {'shadow', 'live'}
         self.telegram_verify_on_start = str(os.getenv('TELEGRAM_VERIFY_ON_START', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -184,15 +293,22 @@ class Aribot:
             if startup_secrets is not None
             else str(os.getenv('BYBIT_TESTNET', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
         )
-        exchange_config = {}
+        exchange_config = {
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'future',
+                'adjustForTimeDifference': True,
+                'recvWindow': 20000,
+            },
+        }
         if startup_secrets is not None and self.bot_mode in {'shadow', 'live'}:
-            exchange_config = {
-                'apiKey': startup_secrets.read_api_key,
-                'secret': startup_secrets.read_api_secret,
-            }
+            exchange_config['apiKey'] = startup_secrets.read_api_key
+            exchange_config['secret'] = startup_secrets.read_api_secret
         self.exchange = ccxt.bybit(exchange_config)
         if self.bybit_testnet:
             self.exchange.set_sandbox_mode(True)
+        with contextlib.suppress(Exception):
+            self.exchange.load_time_difference()
         self.order_executor = None
         if startup_secrets is not None and self.live_execution_enabled:
             self.order_executor = OrderExecutor(
@@ -215,7 +331,7 @@ class Aribot:
         self.losing_trades = 0
         self.max_open_positions = 10
         self.max_tick_age_seconds = 600
-        self.min_24h_volume_usdc = 5_000_000
+        self.min_24h_volume_usdc = 1_000_000
         self.entry_risk_pct = 0.11 # 11% of current balance per trade
         self.atr_volatility_cutoff = 0.05
         self.atr_size_scalar = 0.5
@@ -258,16 +374,64 @@ class Aribot:
         self.last_pulse_sent_at_utc = None
 
         self.markets = self.exchange.load_markets()
-        self.usdc_swaps = [symbol for symbol in self.markets.keys() if self.markets[symbol].get('type') == 'swap' and 'USDT' in symbol]
+        self.all_usdt_swaps = sorted(
+            [symbol for symbol in self.markets.keys() if self.markets[symbol].get('type') == 'swap' and 'USDT' in symbol]
+        )
+        self.usdc_swaps, unmatched_symbol_filters = filter_symbols_by_allowlist(
+            self.all_usdt_swaps,
+            self.requested_symbol_allowlist,
+        )
+        if self.requested_symbol_allowlist:
+            if unmatched_symbol_filters:
+                self.logger.warning(
+                    '⚠️ Symbol focus entries did not match any Bybit USDT swap market: %s',
+                    ', '.join(sorted(unmatched_symbol_filters)),
+                )
+            if not self.usdc_swaps:
+                raise RuntimeError(
+                    'Configured symbol focus resolved to zero tradeable Bybit USDT swap markets'
+                )
+
+        preview_symbols = ', '.join(self.usdc_swaps[:10])
+        suffix = '' if len(self.usdc_swaps) <= 10 else ', ...'
+        self.logger.info(
+            '🎯 Trade universe loaded: %s active symbols (source=%s, total_available=%s)%s%s',
+            len(self.usdc_swaps),
+            self.symbol_allowlist_source,
+            len(self.all_usdt_swaps),
+            ' -> ' if preview_symbols else '',
+            f'{preview_symbols}{suffix}' if preview_symbols else '',
+        )
         self.btc_regime_symbol = self.resolve_btc_regime_symbol()
 
-        self.db_file = 'usdt_bot_v2.db'
+        # Mode-specific sqlite. Paper/shadow/live each get their own file so
+        # their positions and closed trades never commingle. The legacy
+        # unsuffixed `usdt_bot_v2.db` (if present and the new mode-specific
+        # file doesn't yet exist) is auto-renamed to match the current mode,
+        # preserving balance and trade history across the upgrade.
+        mode_slug = (self.bot_mode or 'paper').strip().lower() or 'paper'
+        self.db_file = f'usdt_bot_v2.{mode_slug}.db'
+        legacy_db = Path('usdt_bot_v2.db')
+        target_db = Path(self.db_file)
+        if legacy_db.exists() and not target_db.exists():
+            try:
+                legacy_db.rename(target_db)
+                self.logger.info(
+                    f"📦 Migrated legacy {legacy_db.name} -> {target_db.name} for mode={mode_slug}"
+                )
+            except OSError as exc:
+                self.logger.warning(
+                    f"⚠️ Could not rename legacy db: {type(exc).__name__}: {exc}; "
+                    f"starting fresh with {target_db.name}"
+                )
         self.db = sqlite3.connect(self.db_file, detect_types=sqlite3.PARSE_DECLTYPES)
         self.db.row_factory = sqlite3.Row
         self.setup_database()
         self.shutdown_requested = False
         self.shutdown_exit_code = 0
         self.run_id = uuid.uuid4().hex[:12]
+        self.started_at_utc = datetime.datetime.now(datetime.timezone.utc)
+        self.status_snapshot_file = os.getenv('STATUS_SNAPSHOT_FILE', 'aribot_status.json')
         self.alert_dispatcher = AlertDispatcher(logger=self.logger)
         self.telegram_chat_id = str(getattr(self.alert_dispatcher, 'chat_id', '') or '').strip()
         self.telegram_last_update_id = 0
@@ -426,6 +590,56 @@ class Aribot:
             return False, result.order_data
 
         return True, result.order_data
+
+    def submit_limit_order(self, symbol, side, quantity, price, reason, idempotency_key, leverage=None):
+        if self.order_executor is None:
+            return False, None
+
+        result = self.order_executor.execute_order(
+            symbol=symbol,
+            order_type='limit',
+            side=side,
+            amount=quantity,
+            price=price,
+            idempotency_key=idempotency_key,
+            order_reason=reason,
+            leverage=leverage,
+        )
+        if not result.success:
+            self.logger.error(f"❌ Limit order failed for {symbol} ({reason}): {result.message}")
+            self.emit_structured_event(
+                'WARNING',
+                'live_limit_order_rejected',
+                'execution',
+                'Exchange limit order failed.',
+                symbol=symbol,
+                values={
+                    'reason': reason,
+                    'side': side,
+                    'quantity': quantity,
+                    'price': price,
+                    'message': result.message,
+                    'idempotency_key': result.idempotency_key,
+                },
+            )
+            return False, result.order_data
+
+        return True, result.order_data
+
+    @staticmethod
+    def compute_companion_limit_price(ohlcv, consec_bars, signal_type):
+        if not ohlcv or not consec_bars:
+            return None, None
+        if signal_type == 'BUY':
+            target_idx = max(consec_bars, key=lambda i: ohlcv[i][4])
+        elif signal_type == 'SELL':
+            target_idx = min(consec_bars, key=lambda i: ohlcv[i][4])
+        else:
+            return None, None
+        bar_high = float(ohlcv[target_idx][2])
+        bar_low = float(ohlcv[target_idx][3])
+        trigger_price = (bar_high + bar_low) / 2.0
+        return trigger_price, target_idx
 
     @staticmethod
     def extract_order_fill(order_data, fallback_price, fallback_qty):
@@ -599,34 +813,41 @@ class Aribot:
         if not self.btc_regime_symbol:
             return None
 
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(self.btc_regime_symbol, '4h', limit=260)
-            if not ohlcv:
-                self.logger.warning(
-                    f"⚠️ BTC regime fetch returned empty OHLCV for {self.btc_regime_symbol}"
-                )
-                return None
-            if len(ohlcv) < 200:
-                self.logger.warning(
-                    f"⚠️ BTC regime OHLCV insufficient: got {len(ohlcv)} candles, need 200 ({self.btc_regime_symbol})"
-                )
-                return None
+        for attempt in range(3):
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(self.btc_regime_symbol, '4h', limit=260)
+                if not ohlcv:
+                    self.logger.warning(
+                        f"⚠️ BTC regime fetch returned empty OHLCV for {self.btc_regime_symbol}"
+                    )
+                    return None
+                if len(ohlcv) < 200:
+                    self.logger.warning(
+                        f"⚠️ BTC regime OHLCV insufficient: got {len(ohlcv)} candles, need 200 ({self.btc_regime_symbol})"
+                    )
+                    return None
 
-            ohlc4_values = self.calculate_ohlc4(ohlcv)
-            current_ohlc4 = ohlc4_values[-1]
-            btc_wma_200 = self.calculate_wma(ohlc4_values, period=45, offset=0)
-            if btc_wma_200 is None:
-                self.logger.warning(
-                    f"⚠️ BTC regime WMA-200 calculation returned None for {self.btc_regime_symbol}"
-                )
-                return None
+                ohlc4_values = self.calculate_ohlc4(ohlcv)
+                current_ohlc4 = ohlc4_values[-1]
+                btc_wma_200 = self.calculate_wma(ohlc4_values, period=90, offset=0)
+                if btc_wma_200 is None:
+                    self.logger.warning(
+                        f"⚠️ BTC regime WMA-200 calculation returned None for {self.btc_regime_symbol}"
+                    )
+                    return None
 
-            return 'BUY' if current_ohlc4 > btc_wma_200 else 'SELL'
-        except Exception as exc:
-            self.logger.warning(
-                f"⚠️ BTC regime fetch failed for {self.btc_regime_symbol}: {type(exc).__name__}: {exc}"
-            )
-            return None
+                return 'BUY' if current_ohlc4 > btc_wma_200 else 'SELL'
+            except Exception as exc:
+                if attempt < 2:
+                    self.logger.warning(
+                        f"⚠️ BTC regime fetch failed (attempt {attempt + 1}/3) for {self.btc_regime_symbol}: {type(exc).__name__}: {exc}. Retrying in 1 second..."
+                    )
+                    time.sleep(1)
+                else:
+                    self.logger.error(
+                        f"❌ BTC regime fetch failed after 3 attempts for {self.btc_regime_symbol}: {type(exc).__name__}: {exc}"
+                    )
+                    return None
 
     def get_ticker_quote_volume(self, ticker):
         quote_volume = ticker.get('quoteVolume')
@@ -875,7 +1096,8 @@ class Aribot:
                 native_tp_active INTEGER DEFAULT 0,
                 native_trail_active INTEGER DEFAULT 0,
                 native_sl_price REAL,
-                native_stops_cancelled_at TEXT
+                native_stops_cancelled_at TEXT,
+                companion_limit_order_id TEXT
             )
         ''')
         cursor.execute('''
@@ -926,6 +1148,8 @@ class Aribot:
             cursor.execute("ALTER TABLE positions ADD COLUMN native_sl_price REAL")
         if 'native_stops_cancelled_at' not in existing_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN native_stops_cancelled_at TEXT")
+        if 'companion_limit_order_id' not in existing_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN companion_limit_order_id TEXT")
 
         self.db.commit()
 
@@ -1268,6 +1492,7 @@ class Aribot:
             'drawdown_pct': float(self._compute_session_drawdown_pct()),
             'cooldown_active': bool(cooldown_active),
             'cooldown_until_utc': cooldown_until,
+            'trade_universe_size': int(len(self.usdc_swaps)),
         }
 
     def format_status_command_text(self, now_utc=None):
@@ -1434,6 +1659,8 @@ class Aribot:
             },
             'position_cap': int(self.max_open_positions),
             'stop_pct': float(self._operator_stop_pct_config_value()),
+            'symbol_focus_source': str(self.symbol_allowlist_source or 'all_markets'),
+            'trade_universe_size': int(len(self.usdc_swaps)),
         }
 
     def format_config_command_text(self):
@@ -1446,7 +1673,8 @@ class Aribot:
             f"large_alt:{buckets['large_alt']:.2f}x "
             f"mid_cap:{buckets['mid_cap']:.2f}x "
             f"default:{buckets['default']:.2f}x\n"
-            f"position_cap={snap['position_cap']} stop_pct={snap['stop_pct']:.2f}%"
+            f"position_cap={snap['position_cap']} stop_pct={snap['stop_pct']:.2f}%\n"
+            f"symbol_focus={snap['symbol_focus_source']} active_symbols={snap['trade_universe_size']}"
         )
 
     def set_manual_entry_pause(self, pause_enabled, now_utc=None):
@@ -1639,6 +1867,43 @@ class Aribot:
         self.set_state_value('winning_trades', self.winning_trades)
         self.set_state_value('losing_trades', self.losing_trades)
 
+    def write_status_snapshot(self):
+        # Atomically write a small JSON snapshot for the status HTTP sidecar.
+        # The sidecar derives running/stopped/error/killed from file freshness
+        # + pid liveness + kill_switch presence — this writer only records
+        # facts the bot knows about itself.
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        session_pnl = float(self.current_balance) - float(self.session_start_balance)
+        snapshot = {
+            'schema': 1,
+            'pid': os.getpid(),
+            'run_id': self.run_id,
+            'wrote_at': now_utc.isoformat(),
+            'started_at': self.started_at_utc.isoformat(),
+            'last_cycle_iso': now_utc.isoformat(),
+            'cycle_count': int(self.loop_cycle_count),
+            'loop_interval_seconds': int(self.loop_interval_seconds),
+            'mode': str(self.bot_mode or 'unknown').upper(),
+            'testnet': bool(self.bybit_testnet),
+            'db_file': str(self.db_file),
+            'kill_switch_file': str(self.kill_switch_file),
+            'open_positions': int(len(self.positions)),
+            'current_balance': float(self.current_balance),
+            'total_pnl': float(self.total_pnl),
+            'session_pnl': float(session_pnl),
+            'session_start_balance': float(self.session_start_balance),
+            'daily_drawdown_paused': bool(self.daily_drawdown_paused),
+            'manual_entry_paused': bool(self.manual_entry_paused),
+        }
+        try:
+            target = Path(self.status_snapshot_file)
+            tmp = target.with_suffix(target.suffix + '.tmp')
+            tmp.write_text(json.dumps(snapshot, separators=(',', ':')), encoding='utf-8')
+            os.replace(tmp, target)
+        except Exception as exc:
+            # Never let snapshot I/O crash the trading loop.
+            self.logger.debug(f"status snapshot write failed: {type(exc).__name__}: {exc}")
+
     def serialize_partial_exits(self, partial_exits):
         payload = []
         for item in partial_exits or []:
@@ -1711,6 +1976,7 @@ class Aribot:
             pos.native_trail_active = bool(row['native_trail_active'])
             pos.native_sl_price = row['native_sl_price']
             pos.native_stops_cancelled_at = row['native_stops_cancelled_at'] if 'native_stops_cancelled_at' in row.keys() else None
+            pos.companion_limit_order_id = row['companion_limit_order_id'] if 'companion_limit_order_id' in row.keys() else None
             self.positions[pos.symbol] = pos
 
         self.closed_trades = []
@@ -1842,10 +2108,10 @@ class Aribot:
 
     def confirm_signal(self, ohlcv_data, ohlc4_values, wma_values, current_index, signal_type):
         if signal_type not in ['BUY', 'SELL']:
-            return False
+            return False, []
         prior = current_index - 1
         if prior < 0:
-            return False
+            return False, []
 
         consec = []
         for i in range(prior, -1, -1):
@@ -1859,14 +2125,16 @@ class Aribot:
                 break
 
         if len(consec) < 1:
-            return False
+            return False, []
 
         if signal_type == 'BUY':
             hh = max(consec, key=lambda i: ohlcv_data[i][2])
-            return ohlcv_data[prior][4] > ohlcv_data[hh][4]
+            confirmed = ohlcv_data[prior][4] > ohlcv_data[hh][4]
         else:
             ll = min(consec, key=lambda i: ohlcv_data[i][3])
-            return ohlcv_data[prior][4] < ohlcv_data[ll][4]
+            confirmed = ohlcv_data[prior][4] < ohlcv_data[ll][4]
+
+        return confirmed, consec
 
     def analyze_market(self, symbol, for_entry=False):
         try:
@@ -1933,13 +2201,15 @@ class Aribot:
             atr_ratio = (atr / current_ohlc4) if atr is not None and current_ohlc4 > 0 else 0.0
             diff = current_ohlc4 - wma
             signal_type = 'BUY' if diff > 0 else 'SELL'
-            confirmed = self.confirm_signal(ohlcv, ohlc4_values, wma_values, len(ohlcv)-1, signal_type)
+            confirmed, consec_bars = self.confirm_signal(ohlcv, ohlc4_values, wma_values, len(ohlcv)-1, signal_type)
             return {
                 'symbol': symbol,
                 'current_price': current_ohlc4,
                 'signal': signal_type,
                 'confirmed': confirmed,
                 'atr_ratio': atr_ratio,
+                'ohlcv': ohlcv,
+                'consec_bars': consec_bars,
             }
         except Exception:
             return None
@@ -2022,6 +2292,12 @@ class Aribot:
         self.positions[symbol] = pos
         self.persist_position(pos)
 
+        self._place_companion_limit_order(
+            pos=pos,
+            analysis=analysis,
+            leverage=leverage,
+        )
+
         stored_entry_price = float(pos.entry_price)
         entry_diff_bps = None
         if exchange_entry_price is not None and exchange_entry_price > 0:
@@ -2066,6 +2342,119 @@ class Aribot:
         )
         return True
 
+    def _place_companion_limit_order(self, pos, analysis, leverage):
+        signal_type = analysis.get('signal')
+        ohlcv = analysis.get('ohlcv') or []
+        consec_bars = analysis.get('consec_bars') or []
+
+        trigger_price, target_idx = self.compute_companion_limit_price(ohlcv, consec_bars, signal_type)
+        if trigger_price is None or trigger_price <= 0:
+            self.emit_structured_event(
+                'WARNING',
+                'companion_limit_skipped',
+                'execution',
+                'Could not compute companion limit price; skipping companion limit.',
+                symbol=pos.symbol,
+                values={
+                    'signal': signal_type,
+                    'consec_bar_count': len(consec_bars),
+                },
+            )
+            return
+
+        target_bar = ohlcv[target_idx] if 0 <= target_idx < len(ohlcv) else None
+        bar_high = float(target_bar[2]) if target_bar else None
+        bar_low = float(target_bar[3]) if target_bar else None
+        bar_close = float(target_bar[4]) if target_bar else None
+
+        order_side = 'buy' if pos.side == 'long' else 'sell'
+        qty = float(pos.quantity)
+
+        if not self.live_execution_enabled:
+            self.logger.info(
+                f"🪜 COMPANION LIMIT (paper) {order_side.upper()} {pos.symbol} "
+                f"qty={qty:.6f} @ {trigger_price:.8f} "
+                f"(consec_bars={len(consec_bars)}, target_idx={target_idx})"
+            )
+            self.emit_structured_event(
+                'INFO',
+                'companion_limit_logged',
+                'execution',
+                'Companion limit order logged in paper mode (no exchange placement).',
+                symbol=pos.symbol,
+                values={
+                    'side': order_side,
+                    'quantity': qty,
+                    'trigger_price': trigger_price,
+                    'signal': signal_type,
+                    'consec_bar_count': len(consec_bars),
+                    'target_bar_index': target_idx,
+                    'target_bar_high': bar_high,
+                    'target_bar_low': bar_low,
+                    'target_bar_close': bar_close,
+                },
+            )
+            return
+
+        order_key = f"entry_limit:{pos.symbol}:{order_side}:{int(time.time() // 60)}"
+        ok, order_data = self.submit_limit_order(
+            symbol=pos.symbol,
+            side=order_side,
+            quantity=qty,
+            price=trigger_price,
+            reason='entry',
+            idempotency_key=order_key,
+            leverage=leverage,
+        )
+        if not ok:
+            self.emit_structured_event(
+                'WARNING',
+                'companion_limit_skipped',
+                'execution',
+                'Companion limit order placement failed; market position retained.',
+                symbol=pos.symbol,
+                values={
+                    'side': order_side,
+                    'quantity': qty,
+                    'trigger_price': trigger_price,
+                    'signal': signal_type,
+                },
+            )
+            return
+
+        order_id = None
+        if isinstance(order_data, dict):
+            order_id = order_data.get('id') or order_data.get('order_id')
+        if order_id is None:
+            order_id = ''
+        pos.companion_limit_order_id = str(order_id) if order_id else None
+        self.persist_position(pos)
+
+        self.logger.info(
+            f"🪜 COMPANION LIMIT {order_side.upper()} {pos.symbol} "
+            f"qty={qty:.6f} @ {trigger_price:.8f} order_id={pos.companion_limit_order_id} "
+            f"(consec_bars={len(consec_bars)}, target_idx={target_idx})"
+        )
+        self.emit_structured_event(
+            'INFO',
+            'companion_limit_placed',
+            'execution',
+            'Companion limit order placed alongside market entry.',
+            symbol=pos.symbol,
+            values={
+                'side': order_side,
+                'quantity': qty,
+                'trigger_price': trigger_price,
+                'signal': signal_type,
+                'consec_bar_count': len(consec_bars),
+                'target_bar_index': target_idx,
+                'target_bar_high': bar_high,
+                'target_bar_low': bar_low,
+                'target_bar_close': bar_close,
+                'order_id': pos.companion_limit_order_id,
+            },
+        )
+
     def persist_position(self, pos):
         cursor = self.db.cursor()
         cursor.execute('''
@@ -2074,8 +2463,9 @@ class Aribot:
                 stop_loss, trailing_stop_level, trailing_stop_active,
                 peak_pnl_percentage, current_price, pnl, pnl_percentage,
                 partial_exits_json, native_sl_active, native_tp_active,
-                native_trail_active, native_sl_price, native_stops_cancelled_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                native_trail_active, native_sl_price, native_stops_cancelled_at,
+                companion_limit_order_id
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             pos.symbol,
             pos.side,
@@ -2095,6 +2485,7 @@ class Aribot:
             int(bool(getattr(pos, 'native_trail_active', False))),
             getattr(pos, 'native_sl_price', None),
             getattr(pos, 'native_stops_cancelled_at', None),
+            getattr(pos, 'companion_limit_order_id', None),
         ))
         self.db.commit()
 
@@ -2164,12 +2555,55 @@ class Aribot:
                     result.get('warnings', []),
                 )
 
+        self._cancel_companion_limit_order(pos)
+
         pos.native_sl_active = False
         pos.native_tp_active = False
         pos.native_trail_active = False
         pos.native_sl_price = None
         pos.native_stops_cancelled_at = cancelled_at
         self.persist_position(pos)
+
+    def _cancel_companion_limit_order(self, pos):
+        order_id = getattr(pos, 'companion_limit_order_id', None)
+        if not order_id:
+            return
+
+        if self.live_execution_enabled and self.order_executor is not None:
+            cancel_method = getattr(self.order_executor, 'cancel_order_by_id', None)
+            if callable(cancel_method):
+                result = cancel_method(pos.symbol, order_id)
+            else:
+                result = {
+                    'ok': False,
+                    'warnings': [{'operation': 'cancel_order_by_id', 'error_type': 'missing_method', 'error': 'No cancel-by-id method available'}],
+                }
+            if not result.get('ok', False):
+                self.logger.warning(
+                    '⚠️ Companion limit cancel warning for %s order_id=%s: warnings=%s',
+                    pos.symbol,
+                    order_id,
+                    result.get('warnings', []),
+                )
+                self.emit_structured_event(
+                    'WARNING',
+                    'companion_limit_cancel_failed',
+                    'execution',
+                    'Companion limit cancel failed; order may still be live on exchange.',
+                    symbol=pos.symbol,
+                    values={'order_id': order_id, 'warnings': result.get('warnings', [])},
+                )
+            else:
+                self.emit_structured_event(
+                    'INFO',
+                    'companion_limit_cancelled',
+                    'execution',
+                    'Companion limit order cancelled on position close.',
+                    symbol=pos.symbol,
+                    values={'order_id': order_id},
+                )
+
+        pos.companion_limit_order_id = None
 
     def remove_persisted_position(self, symbol):
         cursor = self.db.cursor()
@@ -2565,12 +2999,19 @@ class Aribot:
         self.logger.info(
             f"🧭 Environment: mode={self.bot_mode}, testnet={self.bybit_testnet}, kill_switch_file={self.kill_switch_file}"
         )
+        self.logger.info(
+            '🎯 Entry universe: %s active symbols from %s',
+            len(self.usdc_swaps),
+            self.symbol_allowlist_source,
+        )
 
         if Path(self.kill_switch_file).exists():
             self.logger.critical(f"🛑 Kill switch detected at startup: {self.kill_switch_file}")
             self.persist_runtime_state()
+            self.write_status_snapshot()
             return
 
+        self.write_status_snapshot()
         self.maybe_send_scheduled_pulse(trigger='startup')
 
         cycle = 0
@@ -2653,6 +3094,7 @@ class Aribot:
                 )
 
             self.persist_runtime_state()
+            self.write_status_snapshot()
 
             cycle_time_ms = (time.perf_counter() - loop_started_at) * 1000.0
             self.emit_structured_event(
@@ -2680,22 +3122,79 @@ PaperTradingBotV2 = Aribot
 
 if __name__ == '__main__':
     load_dotenv(override=True)
-    emoji_mode, _ = parse_emoji_mode_args(sys.argv[1:])
+    emoji_mode, remaining_argv = parse_emoji_mode_args(sys.argv[1:])
+    runtime_args = parse_runtime_args(remaining_argv)
+    symbol_allowlist, symbol_allowlist_source = resolve_symbol_focus_args(runtime_args)
+
+    # Credential resolution priority (locked-in plan):
+    #   1. ARIBOT_CRED_PIPE set (sidecar handoff)  → load from pipe
+    #   2. mode == 'live' AND no pipe              → REFUSE; LIVE requires
+    #                                                 iOS-pushed keys
+    #   3. otherwise                               → SecretLoader/.env path
+    #                                                 (PAPER works keyless,
+    #                                                 SHADOW requires .env)
     try:
-        startup_secret_loader = SecretLoader()
-        startup_secrets = startup_secret_loader.load()
-        startup_secret_loader.validate_startup(startup_secrets)
-        print(
-            "Startup secret validation passed "
-            f"(mode={startup_secrets.bot_mode}, testnet={startup_secrets.bybit_testnet}, "
-            f"config_fingerprint={startup_secret_loader.config_fingerprint(startup_secrets)[:12]}...)"
-        )
+        bot_mode_env = os.getenv('BOT_MODE', 'paper').strip().lower()
+        bybit_testnet_env = SecretLoader._parse_bool(os.getenv('BYBIT_TESTNET'), default=True)
+        kill_switch_env = os.getenv('KILL_SWITCH_FILE', 'kill_switch.flag').strip() or 'kill_switch.flag'
+
+        pipe_creds = None
+        if os.environ.get('ARIBOT_CRED_PIPE') and os.environ.get('ARIBOT_CRED_TOKEN'):
+            try:
+                from credential_pipe import read_from_env as _read_pipe_creds
+                pipe_creds = _read_pipe_creds()
+            except Exception as pipe_exc:
+                print(f"Startup validation failed: credential pipe handoff failed: {pipe_exc}")
+                raise SystemExit(2)
+
+        if pipe_creds is not None:
+            # Sidecar already validated against Bybit at push time, so we skip
+            # the redundant /v5/user/query-api roundtrip and just enforce the
+            # kill-switch precondition.
+            SecretLoader._assert_kill_switch_not_triggered(kill_switch_env)
+            startup_secrets = BotSecrets(
+                bot_mode=bot_mode_env if bot_mode_env in {'paper', 'shadow', 'live'} else 'paper',
+                bybit_testnet=bybit_testnet_env,
+                kill_switch_file=kill_switch_env,
+                read_api_key=pipe_creds.read_api_key,
+                read_api_secret=pipe_creds.read_api_secret,
+                trade_api_key=pipe_creds.trade_api_key,
+                trade_api_secret=pipe_creds.trade_api_secret,
+            )
+            startup_secret_loader = SecretLoader()
+            print(
+                "Startup secret validation passed via iOS vault "
+                f"(mode={startup_secrets.bot_mode}, testnet={startup_secrets.bybit_testnet}, "
+                f"fingerprint={pipe_creds.fingerprint}, "
+                f"config_fingerprint={startup_secret_loader.config_fingerprint(startup_secrets)[:12]}...)"
+            )
+        else:
+            if bot_mode_env == 'live':
+                print(
+                    "Startup validation failed: LIVE mode requires iOS-pushed credentials. "
+                    "Start the bot via the iOS app (POST /start) after submitting Bybit keys. "
+                    "Direct CLI launch is disabled in LIVE mode."
+                )
+                raise SystemExit(2)
+            startup_secret_loader = SecretLoader()
+            startup_secrets = startup_secret_loader.load()
+            startup_secret_loader.validate_startup(startup_secrets)
+            print(
+                "Startup secret validation passed "
+                f"(mode={startup_secrets.bot_mode}, testnet={startup_secrets.bybit_testnet}, "
+                f"config_fingerprint={startup_secret_loader.config_fingerprint(startup_secrets)[:12]}...)"
+            )
     except SecretValidationError as exc:
         print(f"Startup validation failed: {exc}")
         raise SystemExit(2)
 
     try:
-        bot = Aribot(startup_secrets=startup_secrets, emoji_mode=emoji_mode)
+        bot = Aribot(
+            startup_secrets=startup_secrets,
+            emoji_mode=emoji_mode,
+            symbol_allowlist=symbol_allowlist,
+            symbol_allowlist_source=symbol_allowlist_source,
+        )
         bot.verify_telegram_readiness()
     except RuntimeError as exc:
         print(f"Startup readiness failed: {exc}")

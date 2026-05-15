@@ -7,6 +7,14 @@ paper_bot_v2_improvements.docx
 !.env.example
 kill_switch.flag
 
+# Sidecar runtime state (regenerated on every run)
+.aribot.pid
+.aribot.launched.log
+aribot_status.json
+
+# Local Claude Code harness state (per-developer)
+.claude/
+
 # Python caches and local environments
 __pycache__/
 *.py[cod]

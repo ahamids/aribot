@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Aribot",
+    "slug": "aribot",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "aribot",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.aribot.ios"
+    },
+    "android": {
+      "package": "com.aribot.android"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

@@ -5,11 +5,14 @@ Aribot runs from `usdt_paper_bot_v2.py` and trades Bybit perpetuals using a 4h s
 Emoji output mode:
 - Default is `noemojis` (no emoji characters in console/text log output).
 - Use `--emojis` to keep emoji output enabled.
+- Use `--symbols` or `--symbols-file` to restrict the trade universe to selected markets.
 - JSON structured logging in `observability.jsonl` is unchanged by this flag.
 
 Examples:
 - `python usdt_paper_bot_v2.py`
 - `python usdt_paper_bot_v2.py --emojis`
+- `python usdt_paper_bot_v2.py --symbols BTC,ETH,SOL`
+- `python usdt_paper_bot_v2.py --symbols-file symbol_focus.example.json`
 - `python usdc_paper_bot_v2.py`
 - `python usdc_paper_bot_v2.py --emojis`
 
@@ -67,6 +70,47 @@ cp .env.example .env
 ```bash
 python usdt_paper_bot_v2.py
 ```
+
+#### Optional: status HTTP sidecar (for the iOS app)
+
+The bot writes `aribot_status.json` at the end of every loop cycle. A small
+FastAPI sidecar serves that file at `GET /status` for the iOS companion app.
+
+```bash
+pip install -r requirements-status-server.txt
+python status_server.py                       # binds 127.0.0.1:8787
+```
+
+The sidecar is decoupled from the bot — restarting one never affects the
+other. It binds to `127.0.0.1` by default; expose it to the iOS app via
+Tailscale, an SSH tunnel, or `--host 0.0.0.0` behind a reverse proxy. See
+`status_server.py --help` for flags. Endpoints:
+
+- `GET /healthz` — sidecar liveness (independent of the bot).
+- `GET /status` — bot state for the iOS app. Derives `running` / `stopped` /
+  `error` / `killed` from snapshot freshness, pid liveness, and the kill
+  switch file.
+
+If `ARIBOT_API_TOKEN` is set in the sidecar's env, `/status` requires
+`Authorization: Bearer <that-token>` and constant-time compares it. If unset,
+the endpoint is open and the operator is expected to make it unreachable
+through network controls (the default 127.0.0.1 bind enforces that).
+
+To restrict entries to a subset of Bybit USDT swap markets, use either:
+
+```bash
+python usdt_paper_bot_v2.py --symbols BTC,ETH,SOL
+python usdt_paper_bot_v2.py --symbols BTC/USDT:USDT,ETH/USDT:USDT
+python usdt_paper_bot_v2.py --symbols-file symbol_focus.example.json
+```
+
+Symbol focus behavior:
+
+1. `--symbols` accepts comma-separated base assets or full CCXT market symbols.
+2. `--symbols-file` accepts JSON as either `{"symbols": ["BTC", "ETH"]}` or a top-level list.
+3. If both are provided, `--symbols` takes precedence.
+4. Existing open positions are still managed normally even if they are outside the focused entry universe.
+5. `/config` reports the active symbol-focus source and active symbol count.
 
 ## Required Environment
 
