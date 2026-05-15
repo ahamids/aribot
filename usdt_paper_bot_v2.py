@@ -110,6 +110,16 @@ def parse_runtime_args(argv=None):
         '--symbols-file',
         help='Path to a JSON file containing either a symbol list or an object with a symbols list',
     )
+    parser.add_argument(
+        '--user-id',
+        default=os.getenv('ARIBOT_USER_ID'),
+        help=(
+            'Multi-tenant: Supabase UUID for this bot instance. When set, all '
+            'paths (DB, status snapshot, kill switch, log, observability, PID) '
+            'route under <ARIBOT_ARTIFACT_DIR>/tenants/<user_id>/. Without it, '
+            'the bot writes to legacy CWD-relative names (single-tenant).'
+        ),
+    )
     return parser.parse_args(list(argv or []))
 
 
@@ -280,9 +290,25 @@ class PaperPosition:
 
 
 class Aribot:
-    def __init__(self, startup_secrets=None, emoji_mode='noemojis', symbol_allowlist=None, symbol_allowlist_source='all_markets'):
+    def __init__(
+        self,
+        startup_secrets=None,
+        emoji_mode='noemojis',
+        symbol_allowlist=None,
+        symbol_allowlist_source='all_markets',
+        *,
+        tenant_paths=None,
+    ):
+        # tenant_paths is a tenant_registry.TenantPaths bundle. When None,
+        # the bot operates in legacy single-tenant mode (CWD-relative file
+        # names). When set, every per-tenant artifact lives under
+        # tenant_paths.root and the legacy CWD names are not touched.
+        self.tenant_paths = tenant_paths
         self.emoji_mode = normalize_emoji_mode(emoji_mode)
-        self.setup_logging(emoji_mode=self.emoji_mode)
+        self.setup_logging(
+            emoji_mode=self.emoji_mode,
+            log_file_path=str(tenant_paths.log) if tenant_paths is not None else None,
+        )
         self.requested_symbol_allowlist = normalize_symbol_focus_entries(symbol_allowlist)
         self.symbol_allowlist_source = str(symbol_allowlist_source or 'all_markets')
         self.bot_mode = str(getattr(startup_secrets, 'bot_mode', os.getenv('BOT_MODE', 'paper'))).strip().lower()
@@ -309,11 +335,21 @@ class Aribot:
             self.exchange.set_sandbox_mode(True)
         with contextlib.suppress(Exception):
             self.exchange.load_time_difference()
+        # Compute the per-mode DB path here (early) so OrderExecutor and the
+        # later sqlite setup share one source of truth. In tenant mode we
+        # land under tenant_paths.root; in legacy mode we use the historical
+        # CWD-relative `usdt_bot_v2.{mode}.db` filename.
+        mode_slug = (self.bot_mode or 'paper').strip().lower() or 'paper'
+        if tenant_paths is not None:
+            self.db_file = str(tenant_paths.db(mode_slug))
+        else:
+            self.db_file = f'usdt_bot_v2.{mode_slug}.db'
         self.order_executor = None
         if startup_secrets is not None and self.live_execution_enabled:
             self.order_executor = OrderExecutor(
                 startup_secrets.trade_api_key,
                 startup_secrets.trade_api_secret,
+                idempotency_db_path=self.db_file,
             )
             if self.bybit_testnet:
                 self.order_executor.exchange.set_sandbox_mode(True)
@@ -322,7 +358,11 @@ class Aribot:
                 self.order_executor.dry_run = True
         self.positions = {}
         self.closed_trades = []
-        self.kill_switch_file = os.getenv('KILL_SWITCH_FILE', 'kill_switch.flag')
+        self.kill_switch_file = (
+            str(tenant_paths.kill_switch)
+            if tenant_paths is not None
+            else os.getenv('KILL_SWITCH_FILE', 'kill_switch.flag')
+        )
         self.initial_balance = 400.0
         self.current_balance = self.initial_balance
         self.total_pnl = 0.0
@@ -404,26 +444,26 @@ class Aribot:
         )
         self.btc_regime_symbol = self.resolve_btc_regime_symbol()
 
-        # Mode-specific sqlite. Paper/shadow/live each get their own file so
-        # their positions and closed trades never commingle. The legacy
-        # unsuffixed `usdt_bot_v2.db` (if present and the new mode-specific
-        # file doesn't yet exist) is auto-renamed to match the current mode,
-        # preserving balance and trade history across the upgrade.
-        mode_slug = (self.bot_mode or 'paper').strip().lower() or 'paper'
-        self.db_file = f'usdt_bot_v2.{mode_slug}.db'
-        legacy_db = Path('usdt_bot_v2.db')
-        target_db = Path(self.db_file)
-        if legacy_db.exists() and not target_db.exists():
-            try:
-                legacy_db.rename(target_db)
-                self.logger.info(
-                    f"📦 Migrated legacy {legacy_db.name} -> {target_db.name} for mode={mode_slug}"
-                )
-            except OSError as exc:
-                self.logger.warning(
-                    f"⚠️ Could not rename legacy db: {type(exc).__name__}: {exc}; "
-                    f"starting fresh with {target_db.name}"
-                )
+        # Mode-specific sqlite. self.db_file was set early in __init__ so
+        # OrderExecutor could share the path. In legacy mode (no tenant_paths),
+        # auto-migrate the unsuffixed `usdt_bot_v2.db` to the mode-specific
+        # name to preserve history across the original single-tenant upgrade.
+        # In tenant mode this rename is skipped — each tenant starts with a
+        # clean per-mode DB inside their tenant directory.
+        if self.tenant_paths is None:
+            legacy_db = Path('usdt_bot_v2.db')
+            target_db = Path(self.db_file)
+            if legacy_db.exists() and not target_db.exists():
+                try:
+                    legacy_db.rename(target_db)
+                    self.logger.info(
+                        f"📦 Migrated legacy {legacy_db.name} -> {target_db.name} for mode={mode_slug}"
+                    )
+                except OSError as exc:
+                    self.logger.warning(
+                        f"⚠️ Could not rename legacy db: {type(exc).__name__}: {exc}; "
+                        f"starting fresh with {target_db.name}"
+                    )
         self.db = sqlite3.connect(self.db_file, detect_types=sqlite3.PARSE_DECLTYPES)
         self.db.row_factory = sqlite3.Row
         self.setup_database()
@@ -431,7 +471,11 @@ class Aribot:
         self.shutdown_exit_code = 0
         self.run_id = uuid.uuid4().hex[:12]
         self.started_at_utc = datetime.datetime.now(datetime.timezone.utc)
-        self.status_snapshot_file = os.getenv('STATUS_SNAPSHOT_FILE', 'aribot_status.json')
+        self.status_snapshot_file = (
+            str(tenant_paths.status)
+            if tenant_paths is not None
+            else os.getenv('STATUS_SNAPSHOT_FILE', 'aribot_status.json')
+        )
         self.alert_dispatcher = AlertDispatcher(logger=self.logger)
         self.telegram_chat_id = str(getattr(self.alert_dispatcher, 'chat_id', '') or '').strip()
         self.telegram_last_update_id = 0
@@ -443,7 +487,14 @@ class Aribot:
         except (TypeError, ValueError):
             self.telegram_confirmation_ttl_seconds = 90
         self.telegram_pending_confirmations = {}
-        self.structured_logger = StructuredEventLogger('observability.jsonl', self.run_id)
+        # Per-tenant structured event log when running multi-tenant; legacy
+        # single-stream observability.jsonl in the repo root otherwise.
+        observability_path = (
+            str(tenant_paths.root / 'observability.jsonl')
+            if tenant_paths is not None
+            else 'observability.jsonl'
+        )
+        self.structured_logger = StructuredEventLogger(observability_path, self.run_id)
         self.funding_tracker = FundingTracker(self.exchange, self.db, self.emit_structured_event, self.run_id)
         self.funding_tracker.ensure_schema()
         self.startup_reconciler = StartupReconciler(
@@ -1054,7 +1105,15 @@ class Aribot:
             return self.mid_cap_leverage, 'mid_cap'
         return self.default_leverage, 'default'
 
-    def setup_logging(self, emoji_mode='noemojis'):
+    def setup_logging(self, emoji_mode='noemojis', log_file_path=None):
+        """Configure the 'Aribot' logger with a console handler and a file
+        handler.
+
+        log_file_path: when None, write to 'usdt_trading_log.txt' in CWD
+        (legacy single-tenant). When set (passed by __init__ in multi-tenant
+        mode), write to the per-tenant log path so two tenants don't
+        commingle log lines in one file.
+        """
         self.logger = logging.getLogger('Aribot')
         self.logger.setLevel(logging.INFO)
         self.logger.handlers.clear()
@@ -1067,7 +1126,12 @@ class Aribot:
         console_handler.setFormatter(formatter)
         console_handler.addFilter(emoji_filter)
 
-        file_handler = logging.FileHandler('usdt_trading_log.txt', mode='a', encoding='utf-8')
+        log_path = log_file_path or 'usdt_trading_log.txt'
+        # Ensure the parent directory exists when running in tenant mode
+        # (TenantRegistry already mkdir's the tenant root, but be explicit
+        # for the case where the caller passes some other path).
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, mode='a', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         file_handler.addFilter(emoji_filter)
@@ -2996,6 +3060,19 @@ class Aribot:
 
     def run(self):
         self.logger.info('🚀 Starting paper_bot_v2...')
+        # In multi-tenant mode, advertise our PID under the tenant directory
+        # so the sidecar's startup reconciler can find us after a restart
+        # without sweeping /proc. Best-effort: a write failure is logged but
+        # doesn't stop the bot from running.
+        if self.tenant_paths is not None:
+            try:
+                self.tenant_paths.pid.parent.mkdir(parents=True, exist_ok=True)
+                self.tenant_paths.pid.write_text(str(os.getpid()), encoding='utf-8')
+            except OSError as exc:
+                self.logger.warning(
+                    f"⚠️ Could not write PID file at {self.tenant_paths.pid}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         self.logger.info(
             f"🧭 Environment: mode={self.bot_mode}, testnet={self.bybit_testnet}, kill_switch_file={self.kill_switch_file}"
         )
@@ -3126,6 +3203,19 @@ if __name__ == '__main__':
     runtime_args = parse_runtime_args(remaining_argv)
     symbol_allowlist, symbol_allowlist_source = resolve_symbol_focus_args(runtime_args)
 
+    # Multi-tenant: when --user-id is present (or ARIBOT_USER_ID is set in
+    # the spawn env by the sidecar), resolve all paths under
+    # <ARIBOT_ARTIFACT_DIR>/tenants/<user_id>/ via TenantRegistry. Without
+    # --user-id, the bot stays in legacy single-tenant mode.
+    bot_tenant_paths = None
+    if runtime_args.user_id:
+        from tenant_registry import TenantRegistry
+        artifact_dir = Path(os.getenv('ARIBOT_ARTIFACT_DIR', '.aribot')).resolve()
+        bot_tenant_paths = TenantRegistry(artifact_dir).paths_for(runtime_args.user_id)
+        # Override kill_switch_env so the secret loader's pre-Aribot
+        # kill-switch precondition check uses the per-tenant path.
+        os.environ['KILL_SWITCH_FILE'] = str(bot_tenant_paths.kill_switch)
+
     # Credential resolution priority (locked-in plan):
     #   1. ARIBOT_CRED_PIPE set (sidecar handoff)  → load from pipe
     #   2. mode == 'live' AND no pipe              → REFUSE; LIVE requires
@@ -3194,6 +3284,7 @@ if __name__ == '__main__':
             emoji_mode=emoji_mode,
             symbol_allowlist=symbol_allowlist,
             symbol_allowlist_source=symbol_allowlist_source,
+            tenant_paths=bot_tenant_paths,
         )
         bot.verify_telegram_readiness()
     except RuntimeError as exc:

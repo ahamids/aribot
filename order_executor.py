@@ -51,13 +51,24 @@ class OrderExecutor:
     ON order_idempotency(status, updated_at);
     '''
 
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        *,
+        idempotency_db_path: Optional[str] = None,
+    ):
         """
         Initialize OrderExecutor with Bybit credentials.
 
         Args:
             api_key: Bybit API key
             api_secret: Bybit API secret
+            idempotency_db_path: Optional explicit path to the order
+                idempotency SQLite. When None (default), falls back to the
+                ORDER_EXECUTOR_DB env var, then to 'usdt_paper_bot_v2.db'
+                in CWD. The bot passes its per-tenant DB path here in
+                multi-tenant mode so order idempotency is also tenant-scoped.
         """
         self.dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'
         self.exchange = ccxt.bybit({
@@ -74,7 +85,11 @@ class OrderExecutor:
             self.exchange.load_time_difference()
         self.order_status_timeout_seconds = int(os.getenv('ORDER_STATUS_TIMEOUT_SECONDS', '30'))
         self.order_status_poll_interval_seconds = float(os.getenv('ORDER_STATUS_POLL_INTERVAL_SECONDS', '1.5'))
-        self.idempotency_db_path = os.getenv('ORDER_EXECUTOR_DB', 'usdt_paper_bot_v2.db')
+        self.idempotency_db_path = (
+            idempotency_db_path
+            or os.getenv('ORDER_EXECUTOR_DB')
+            or 'usdt_paper_bot_v2.db'
+        )
         self.idempotency_db = sqlite3.connect(self.idempotency_db_path)
         self.idempotency_db.row_factory = sqlite3.Row
         self._ensure_idempotency_schema()
