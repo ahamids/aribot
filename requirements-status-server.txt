@@ -15,3 +15,10 @@ psutil>=5.9
 pynacl>=1.5
 cryptography>=42
 keyring>=24
+
+# Multi-tenant JWT validation (auth_supabase.py).
+# - PyJWT: HS256 verification of Supabase access tokens. The [crypto] extra
+#   pulls in `cryptography` (already required above) and keeps RS256 ready
+#   in case Supabase ever rotates to asymmetric signing.
+# Deliberately NOT python-jose (larger surface, CVE history).
+PyJWT[crypto]>=2.8

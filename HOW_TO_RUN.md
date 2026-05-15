@@ -413,3 +413,49 @@ http://<that IP>:8787/healthz
 ```
 
 That's the whole game.
+
+---
+
+## Multi-tenant mode (in progress)
+
+The project is mid-migration from "one bot per VPS" to "one bot per
+Supabase user, all running on the same VPS." The migration is shipping
+in phases; each phase leaves the system runnable in either single-tenant
+mode or the new multi-tenant mode.
+
+**Status as of Phase 1**
+
+| Component                                  | State                              |
+| ------------------------------------------ | ---------------------------------- |
+| `tenant_registry.py`                       | Wired (paths, configs, registry)   |
+| `meta.db` (`meta_db.py`)                   | Schema + CRUD ready                |
+| Supabase JWT verification (`auth_supabase.py`) | Importable, not yet enforced   |
+| Per-user `CredentialStore`                 | Phase 2                            |
+| Bot `--user-id` flag                       | Phase 3                            |
+| Sidecar endpoints scoped per JWT           | Phase 4                            |
+| Legacy bearer-token mode default           | Removed in Phase 5                 |
+
+**Required env for multi-tenant mode** (see `.env.example`):
+
+```
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_JWT_SECRET=...           # JWT secret from Supabase Dashboard
+ARIBOT_ARTIFACT_DIR=              # optional; defaults to <repo>/.aribot
+```
+
+**Until Phase 4 ships**, the sidecar continues to authenticate with the
+shared `ARIBOT_API_TOKEN` and operates on a single tenant. No iOS-side
+changes are required yet.
+
+**After Phase 5 ships**, the daily-operation block above changes:
+
+```powershell
+# Sidecar in multi-tenant mode (default once Phase 5 lands)
+cd C:\git\aribot-og; python status_server.py --host 0.0.0.0 --port 8787
+
+# To temporarily fall back to single-tenant during ops emergencies:
+python status_server.py --host 0.0.0.0 --port 8787 --legacy-single-user
+```
+
+Each user's bot is launched on demand by the sidecar (no separate Terminal 1).
+

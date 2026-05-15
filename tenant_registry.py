@@ -65,12 +65,18 @@ class BotProcessHandle:
     start/stop helpers already handle that via `.pid_path()` + psutil.
     This dataclass is just for in-memory bookkeeping so a `/status` for
     User B can return immediately without re-reading their pid file.
+
+    `run_id` is the bot-side correlation id (also written into the
+    structured event log and `meta.db.bot_runs`). Empty string when the
+    handle is reconstructed at sidecar startup from a still-alive PID
+    we didn't witness being launched.
     """
 
     user_id: str
     pid: int
     started_at_ts: float = field(default_factory=time.time)
     mode_at_start: str = "paper"
+    run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,17 @@ class TenantRegistry:
         self.tenants_root.mkdir(parents=True, exist_ok=True)
         self._handles: Dict[str, BotProcessHandle] = {}
         self._lock = threading.RLock()
+
+    # ───── shared (cross-tenant) artifacts ────────────────────────────
+
+    @property
+    def meta_db_path(self) -> Path:
+        """Path to the operator-side metadata DB (tenants, audit_log, bot_runs).
+
+        Owned by the sidecar. Bots never read or write this file. See
+        `meta_db.MetaDb`.
+        """
+        return self.artifact_dir / "meta.db"
 
     # ───── path resolution ────────────────────────────────────────────
 
@@ -218,6 +235,27 @@ class TenantRegistry:
             if child.is_dir() and _USER_ID_RE.match(child.name):
                 out.append(child.name)
         return sorted(out)
+
+    def iter_tenants_with_pid(self) -> Iterator[tuple[str, Optional[int]]]:
+        """Yields `(user_id, pid_or_None)` for every tenant on disk.
+
+        Reads each tenant's `bot.pid` file once. Returns `None` for the
+        pid when the file is missing or malformed (treat as "no bot
+        process associated yet"). Liveness is the caller's job — the
+        sidecar typically follows up with `psutil.pid_exists(pid)` to
+        decide whether to repopulate `BotProcessHandle` or unlink a
+        stale pid file.
+        """
+        for user_id in self.all_known_tenants():
+            pid_path = self.pid_path(user_id)
+            pid: Optional[int] = None
+            try:
+                raw = pid_path.read_text(encoding="utf-8").strip()
+                if raw:
+                    pid = int(raw)
+            except (FileNotFoundError, OSError, ValueError):
+                pid = None
+            yield user_id, pid
 
 
 if __name__ == "__main__":
