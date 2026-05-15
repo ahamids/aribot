@@ -1,10 +1,19 @@
-"""In-memory store for iOS-pushed Bybit credentials.
+"""In-memory, per-user store for iOS-pushed Bybit credentials.
 
 The sidecar receives sealed-box payloads from the iOS app at POST /credentials,
 decrypts them with the host keypair (bot_keypair.HostIdentity), validates the
 keys against Bybit's /v5/user/query-api, and stores the plaintext in this
 process-local store. The trading bot fetches the plaintext via the IPC handoff
 (credential_pipe) at startup; the keys never touch disk.
+
+Multi-tenant model: every entry is keyed by `user_id` (typically a Supabase
+UUID, but treated as an opaque non-empty string by this module — the legacy
+single-tenant code path uses the sentinel `"__legacy__"` from
+auth_supabase.LEGACY_OPS_ID). Two users pushing credentials never collide:
+each lands under their own key in `_by_user`. The caller is responsible for
+sourcing `user_id` from a verified JWT (or the legacy sentinel) — this
+module performs only minimal "non-empty string" validation because the
+user_id is used only as a dict key, never as a path component.
 
 Replay protection:
   - Each push carries an iOS-side ISO timestamp and a monotonic counter,
@@ -14,9 +23,13 @@ Replay protection:
   - We reject |now − timestamp| > 60s.
   - We persist a per-sender_pubkey "last seen counter" on disk in JSON and
     reject any counter <= last seen. The store on disk holds NO secrets.
+  - Replay state stays keyed by sender_pubkey (NOT user_id) because the
+    threat model is "replay an intercepted push" — the sender_pubkey is
+    what binds a push to a specific iOS session. Different users have
+    distinct ephemeral keypairs; cross-user replay is naturally prevented.
 
-Concurrency: a single threading.RLock protects the in-memory record. Reads
-return a snapshot tuple, so callers don't hold the lock while doing IO.
+Concurrency: a single threading.RLock protects the in-memory dict. Reads
+return a snapshot, so callers don't hold the lock while doing IO.
 """
 
 from __future__ import annotations
@@ -28,7 +41,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from bot_keypair import HostIdentity, CredentialDecryptError
 from secret_loader import (
@@ -138,46 +151,88 @@ def _key_fingerprint(read_key: str) -> str:
     return hashlib.sha256(read_key.encode("utf-8")).hexdigest()[:16]
 
 
+def _short_uid(user_id: str) -> str:
+    """Truncate a user_id for log lines so we don't dump full UUIDs in plain
+    text. Short identifiers (like the legacy sentinel `"__legacy__"`) pass
+    through unchanged."""
+    return user_id[:8] + "…" if len(user_id) > 12 else user_id
+
+
 class CredentialStore:
-    """Thread-safe in-memory holder for iOS-supplied credentials."""
+    """Thread-safe in-memory holder for iOS-supplied credentials, keyed by user_id."""
 
     def __init__(self, host: HostIdentity, state_dir: Path):
         self._host = host
         self._state_dir = state_dir
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._current: Optional[LoadedCredentials] = None
+        # Per-user credential dict. Empty until the first POST /credentials
+        # from any tenant. The legacy sentinel `"__legacy__"` lives here too
+        # alongside real Supabase UUIDs; both are treated as opaque keys.
+        self._by_user: Dict[str, LoadedCredentials] = {}
         self._replay = _load_replay_state(state_dir / _REPLAY_FILE)
 
-    def is_loaded(self) -> bool:
-        with self._lock:
-            return self._current is not None
+    @staticmethod
+    def _check_user_id(user_id: str) -> str:
+        """Defensive guard against accidental misuse (None, empty string,
+        non-string types). This is NOT a security boundary — the upstream
+        JWT verifier is. We just want to fail loudly if a caller forgets
+        to thread `user_id` through."""
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must be a non-empty string")
+        return user_id
 
-    def status(self) -> CredentialStatus:
+    def is_loaded(self, user_id: str) -> bool:
+        uid = self._check_user_id(user_id)
         with self._lock:
-            if self._current is None:
+            return uid in self._by_user
+
+    def status(self, user_id: str) -> CredentialStatus:
+        uid = self._check_user_id(user_id)
+        with self._lock:
+            cred = self._by_user.get(uid)
+            if cred is None:
                 return CredentialStatus(loaded=False)
             return CredentialStatus(
                 loaded=True,
-                fingerprint=self._current.fingerprint,
-                source=self._current.source,
-                validatedAtIso=self._current.validated_at_iso,
+                fingerprint=cred.fingerprint,
+                source=cred.source,
+                validatedAtIso=cred.validated_at_iso,
             )
 
-    def clear(self) -> None:
+    def clear(self, user_id: str) -> None:
+        uid = self._check_user_id(user_id)
         with self._lock:
-            self._current = None
-            log.info("credential store cleared")
+            if self._by_user.pop(uid, None) is not None:
+                log.info("credential store cleared for user=%s", _short_uid(uid))
 
-    def snapshot(self) -> Optional[LoadedCredentials]:
-        """Return the current credentials (or None). Callers should NOT log
-        or persist the returned record."""
+    def clear_all_for_shutdown(self) -> None:
+        """Drop every tenant's credentials from RAM. Intended for sidecar
+        SIGTERM cleanup. Logs the count but no identifying details."""
         with self._lock:
-            return self._current
+            count = len(self._by_user)
+            self._by_user.clear()
+            if count:
+                log.info("credential store cleared %d record(s) on shutdown", count)
+
+    def loaded_user_ids(self) -> list[str]:
+        """List of user_ids with credentials currently in memory. Useful for
+        sidecar `/admin` endpoints (future) and for the SIGTERM logger.
+        Does not return secrets."""
+        with self._lock:
+            return list(self._by_user.keys())
+
+    def snapshot(self, user_id: str) -> Optional[LoadedCredentials]:
+        """Return the credentials for `user_id` (or None). Callers MUST NOT
+        log or persist the returned record."""
+        uid = self._check_user_id(user_id)
+        with self._lock:
+            return self._by_user.get(uid)
 
     def accept_sealed_push(
         self,
         *,
+        user_id: str,
         ciphertext_b64: str,
         nonce_b64: str,
         sender_pubkey_b64: str,
@@ -195,6 +250,7 @@ class CredentialStore:
         layer (400/401/422/200) without leaking which step failed beyond
         what's safe to expose.
         """
+        uid = self._check_user_id(user_id)
         now = datetime.datetime.now(datetime.timezone.utc)
 
         ts = _parse_iso(timestamp_iso)
@@ -278,7 +334,7 @@ class CredentialStore:
         validated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         with self._lock:
-            self._current = LoadedCredentials(
+            self._by_user[uid] = LoadedCredentials(
                 read_api_key=read_key,
                 read_api_secret=read_secret,
                 trade_api_key=trade_key,
@@ -291,7 +347,8 @@ class CredentialStore:
             _save_replay_state(self._state_dir / _REPLAY_FILE, self._replay)
 
         log.info(
-            "credentials accepted: fingerprint=%s sender_pub=%s counter=%d",
+            "credentials accepted: user=%s fingerprint=%s sender_pub=%s counter=%d",
+            _short_uid(uid),
             fingerprint,
             sender_pubkey_b64[:12] + "…",
             counter,
@@ -318,3 +375,80 @@ class CredentialStore:
         loader.validate_keypair_against_bybit(
             api_key=trade_key, api_secret=trade_secret, testnet=bybit_testnet, role="trade"
         )
+
+
+if __name__ == "__main__":
+    # Smoke-test the per-user dict isolation. This is white-box: it does not
+    # exercise sealed-box decryption or Bybit validation (those need a real
+    # X25519 keypair and network access). The full end-to-end isolation
+    # check lives in tests/test_multitenant_isolation.py (Phase 4).
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        # We pass host=None because none of the tested methods touch _host.
+        store = CredentialStore(host=None, state_dir=Path(td))  # type: ignore[arg-type]
+        u1 = "11111111-2222-3333-4444-555555555555"
+        u2 = "99999999-8888-7777-6666-555555555555"
+
+        assert not store.is_loaded(u1)
+        assert not store.is_loaded(u2)
+        assert store.loaded_user_ids() == []
+
+        cred_a = LoadedCredentials(
+            read_api_key="A_read", read_api_secret="A_read_s",
+            trade_api_key="A_trade", trade_api_secret="A_trade_s",
+            fingerprint="A_FP", validated_at_iso="2026-01-01T00:00:00+00:00",
+        )
+        cred_b = LoadedCredentials(
+            read_api_key="B_read", read_api_secret="B_read_s",
+            trade_api_key="B_trade", trade_api_secret="B_trade_s",
+            fingerprint="B_FP", validated_at_iso="2026-01-02T00:00:00+00:00",
+        )
+        # Direct dict population so we don't need real X25519 + Bybit roundtrip.
+        store._by_user[u1] = cred_a
+        store._by_user[u2] = cred_b
+
+        assert store.is_loaded(u1) and store.is_loaded(u2)
+        assert store.status(u1).fingerprint == "A_FP"
+        assert store.status(u2).fingerprint == "B_FP"
+        snap_a = store.snapshot(u1)
+        snap_b = store.snapshot(u2)
+        assert snap_a is not None and snap_a.read_api_key == "A_read"
+        assert snap_b is not None and snap_b.read_api_key == "B_read"
+        assert set(store.loaded_user_ids()) == {u1, u2}
+
+        # Clearing one user must not affect the other — the migration's whole
+        # reason for existing.
+        store.clear(u1)
+        assert not store.is_loaded(u1)
+        assert store.is_loaded(u2)
+        assert store.status(u2).fingerprint == "B_FP"
+        assert store.snapshot(u1) is None
+
+        # Unknown user returns absent without raising.
+        unknown = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        assert not store.is_loaded(unknown)
+        assert store.status(unknown).loaded is False
+        assert store.snapshot(unknown) is None
+
+        # Empty / non-string user_id raises.
+        for bad in ("", "   ", None, 123):
+            try:
+                store.is_loaded(bad)  # type: ignore[arg-type]
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"expected ValueError for user_id={bad!r}")
+
+        # Legacy sentinel works as an opaque key.
+        store._by_user["__legacy__"] = cred_a
+        assert store.is_loaded("__legacy__")
+        assert store.status("__legacy__").fingerprint == "A_FP"
+
+        # Shutdown wipes everything in one shot.
+        store.clear_all_for_shutdown()
+        assert not store.is_loaded(u2)
+        assert not store.is_loaded("__legacy__")
+        assert store.loaded_user_ids() == []
+
+        print("credential_store smoke test passed.")

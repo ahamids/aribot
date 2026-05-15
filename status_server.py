@@ -49,6 +49,7 @@ except ImportError as exc:
         "status_server requires psutil. Install with: pip install -r requirements-status-server.txt"
     ) from exc
 
+from auth_supabase import LEGACY_OPS_ID
 from bot_keypair import HostIdentity, get_or_create_identity
 from credential_pipe import CredentialServer
 from credential_store import CredentialStore
@@ -497,9 +498,12 @@ def start_bot(cfg: Config, credential_store: CredentialStore) -> tuple[bool, str
         bot_mode = _read_bot_mode(cfg)
         cred_handle = None
         cred_server: Optional[CredentialServer] = None
-        if credential_store.is_loaded():
+        # Phase 2: still single-tenant from the iOS app's perspective. The
+        # credential store now requires a user_id; we thread the legacy
+        # sentinel until Phase 4 wires per-tenant JWT routing.
+        if credential_store.is_loaded(LEGACY_OPS_ID):
             cred_server = CredentialServer()
-            cred_handle = cred_server.start(credential_store.snapshot())
+            cred_handle = cred_server.start(credential_store.snapshot(LEGACY_OPS_ID))
         elif bot_mode == "live":
             return (
                 False,
@@ -1132,6 +1136,7 @@ def build_app(
         # against the same Bybit environment the bot will use.
         bybit_testnet = _read_bybit_testnet(cfg)
         result = credential_store.accept_sealed_push(
+            user_id=LEGACY_OPS_ID,
             ciphertext_b64=body.ciphertext,
             nonce_b64=body.nonce,
             sender_pubkey_b64=body.senderPublicKey,
@@ -1146,7 +1151,7 @@ def build_app(
 
     @app.get("/credentials/status", response_model=CredentialsStatusOut)
     def get_credentials_status(_: None = Depends(require_vault_token)) -> CredentialsStatusOut:
-        st = credential_store.status()
+        st = credential_store.status(LEGACY_OPS_ID)
         return CredentialsStatusOut(
             loaded=st.loaded,
             fingerprint=st.fingerprint,
@@ -1156,7 +1161,7 @@ def build_app(
 
     @app.delete("/credentials", response_model=CredentialsAckOut)
     def delete_credentials(_: None = Depends(require_vault_token)) -> CredentialsAckOut:
-        credential_store.clear()
+        credential_store.clear(LEGACY_OPS_ID)
         return CredentialsAckOut(ok=True, detail="credentials wiped")
 
     return app

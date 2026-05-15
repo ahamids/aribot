@@ -17,6 +17,12 @@ Approach used here:
   - One successful send per launch. The server stops accepting after that,
     so a second connector cannot exfiltrate.
 
+Per-launch scoping (multi-tenant): one `CredentialServer` instance per bot
+launch (per tenant). Each launch generates a fresh handshake token; the
+listener stops after one successful handoff. Two simultaneous tenant
+launches get two independent listeners on different ports with different
+tokens — they cannot read each other's credentials.
+
 Listener lifetime: started by status_server before Popen, stopped after the
 bot reads (or after a 30s timeout, whichever comes first).
 """
@@ -71,6 +77,17 @@ class CredentialServer:
     def start(self, credentials: LoadedCredentials) -> PipeHandle:
         if self._socket is not None:
             raise RuntimeError("CredentialServer already started")
+
+        # Defense in depth: refuse to bind anywhere but loopback. In multi-
+        # tenant mode this server runs once per bot launch (per tenant); a
+        # stray 0.0.0.0 bind would expose every tenant's plaintext keys to
+        # the LAN. The constructor default is "127.0.0.1"; this guards
+        # against future callers passing host=... by mistake.
+        if self._bind_host != "127.0.0.1":
+            raise RuntimeError(
+                f"CredentialServer refuses non-loopback bind '{self._bind_host}' "
+                "— loopback-only by design"
+            )
 
         self._token_hex = secrets.token_hex(32)
         payload = json.dumps(
