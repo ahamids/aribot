@@ -291,23 +291,33 @@ without a successful credential push will be refused with HTTP 412.
 
 ## Daily operation (after the one-time setup)
 
-Open **three PowerShell windows**, run one command in each, in this order:
+In multi-tenant mode (the default), the sidecar launches each user's bot
+on demand when they tap "start" in the iOS app. You no longer need a
+dedicated bot terminal.
+
+Open **two PowerShell windows**, run one command in each:
 
 ```powershell
-# Terminal 1 — the bot
-cd C:\git\aribot-og; python usdt_paper_bot_v2.py --symbols-file symbol_focus.example.json --emojis
-
-# Terminal 2 — the sidecar
+# Terminal 1 — the sidecar (spawns per-tenant bots on POST /start)
 cd C:\git\aribot-og; python status_server.py --host 0.0.0.0 --port 8787
 
-# Terminal 3 — Metro
+# Terminal 2 — Metro (only needed during iOS app development)
 cd C:\git\aribot-og\app; $env:REACT_NATIVE_PACKAGER_HOSTNAME = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias 'Wi-Fi').IPAddress; npx expo start --host lan
 ```
 
-The Terminal 3 command auto-resolves your current Wi-Fi IP, so you don't
-have to look it up by hand each time.
+The sidecar requires `SUPABASE_URL` and `SUPABASE_JWT_SECRET` in the
+environment — set them in `.env` (see `.env.example`). Without those,
+the sidecar refuses to boot in multi-tenant mode and exits with a
+clear error.
 
-Scan the new QR with the iPhone Camera app. Done.
+Scan Metro's QR with the iPhone Camera app. Sign in with your Supabase
+account in the iOS app, push your Bybit keys via the Vault screen, and
+tap "start". The sidecar spawns *your* bot under
+`<ARIBOT_ARTIFACT_DIR>/tenants/<your-uuid>/`. Two users can do this
+simultaneously without their data, logs, or bots colliding.
+
+**For production**, you only need Terminal 1 (the sidecar). The iOS
+app is the operator UI for end users; Metro is a developer-only tool.
 
 ---
 
@@ -416,46 +426,77 @@ That's the whole game.
 
 ---
 
-## Multi-tenant mode (in progress)
+## Multi-tenant architecture (the model in use)
 
-The project is mid-migration from "one bot per VPS" to "one bot per
-Supabase user, all running on the same VPS." The migration is shipping
-in phases; each phase leaves the system runnable in either single-tenant
-mode or the new multi-tenant mode.
+Every artifact a bot writes lives under one tenant directory:
 
-**Status as of Phase 1**
+```
+<ARIBOT_ARTIFACT_DIR>/                # defaults to <repo>/.aribot
+  meta.db                             # cross-tenant audit + run history (sidecar-only)
+  host_keypair.json, tls_cert.pem     # operator-side identity
+  tenants/<supabase-uuid>/
+    usdt_bot_v2.{paper,shadow,live}.db   # per-tenant trade state
+    bot.log, bot.launcher.log            # per-tenant logs
+    bot.pid, status.json, kill_switch.flag
+    config.json                          # per-tenant BOT_MODE, BYBIT_TESTNET
+    observability.jsonl                  # per-tenant structured events
+```
 
-| Component                                  | State                              |
-| ------------------------------------------ | ---------------------------------- |
-| `tenant_registry.py`                       | Wired (paths, configs, registry)   |
-| `meta.db` (`meta_db.py`)                   | Schema + CRUD ready                |
-| Supabase JWT verification (`auth_supabase.py`) | Importable, not yet enforced   |
-| Per-user `CredentialStore`                 | Phase 2                            |
-| Bot `--user-id` flag                       | Phase 3                            |
-| Sidecar endpoints scoped per JWT           | Phase 4                            |
-| Legacy bearer-token mode default           | Removed in Phase 5                 |
+A second user's data lives under a different `tenants/<other-uuid>/`
+subtree — different SQLite files, different log files, different
+process. There is no shared writer.
 
-**Required env for multi-tenant mode** (see `.env.example`):
+**Auth.** Every endpoint requires a Supabase JWT. The `sub` claim
+becomes the `user_id` everywhere downstream. `POST /credentials*` is
+JWT-only — even a leaked legacy ops token cannot push or wipe a
+tenant's keys.
+
+**Sidecar restart safety.** On boot, the sidecar walks
+`tenants/*/bot.pid`, validates each PID with psutil, and rebuilds its
+in-memory running-bot registry. Stale pid files are unlinked.
+
+**Required env** (in `.env`):
 
 ```
 SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_JWT_SECRET=...           # JWT secret from Supabase Dashboard
+SUPABASE_JWT_SECRET=…             # Supabase Dashboard → API → JWT Settings
 ARIBOT_ARTIFACT_DIR=              # optional; defaults to <repo>/.aribot
 ```
 
-**Until Phase 4 ships**, the sidecar continues to authenticate with the
-shared `ARIBOT_API_TOKEN` and operates on a single tenant. No iOS-side
-changes are required yet.
+Without these, the sidecar refuses to boot in multi-tenant mode and
+exits with code 2.
 
-**After Phase 5 ships**, the daily-operation block above changes:
+---
+
+## Legacy single-tenant mode (deprecated)
+
+For ops emergencies during the multi-tenant migration window, the
+sidecar can fall back to the original single-tenant behavior:
 
 ```powershell
-# Sidecar in multi-tenant mode (default once Phase 5 lands)
-cd C:\git\aribot-og; python status_server.py --host 0.0.0.0 --port 8787
-
-# To temporarily fall back to single-tenant during ops emergencies:
-python status_server.py --host 0.0.0.0 --port 8787 --legacy-single-user
+# Operator-only fallback. Prints a deprecation warning.
+cd C:\git\aribot-og; python status_server.py --host 0.0.0.0 --port 8787 --legacy-single-user
 ```
 
-Each user's bot is launched on demand by the sidecar (no separate Terminal 1).
+In this mode endpoints accept ONLY the legacy `ARIBOT_API_TOKEN` bearer
+and operate on the original CWD-relative paths
+(`usdt_bot_v2.{mode}.db`, `aribot_status.json`, `kill_switch.flag`,
+`usdt_trading_log.txt`). The bot must be started in its own terminal as
+in the pre-migration days:
+
+```powershell
+# Legacy three-terminal flow (deprecated; do not use for new deployments)
+# Terminal 1 — bot
+cd C:\git\aribot-og; python usdt_paper_bot_v2.py --symbols-file symbol_focus.example.json --emojis
+
+# Terminal 2 — sidecar (legacy)
+cd C:\git\aribot-og; python status_server.py --host 0.0.0.0 --port 8787 --legacy-single-user
+
+# Terminal 3 — Metro
+cd C:\git\aribot-og\app; npx expo start --host lan
+```
+
+**`--legacy-single-user` will be removed in a future release.** It exists
+solely to give operators a safety valve during the cut-over. New
+deployments should always use multi-tenant mode.
 

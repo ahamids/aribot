@@ -1659,6 +1659,16 @@ def main() -> None:
     registry: Optional[TenantRegistry] = None
     meta_db: Optional[MetaDb] = None
     jwt_verifier: Optional[SupabaseJwtVerifier] = None
+    if args.legacy_single_user:
+        print(
+            "[status_server] DEPRECATED: --legacy-single-user (or "
+            "ARIBOT_LEGACY_SINGLE_USER=1) is for ops emergencies only. "
+            "Multi-tenant mode is the supported configuration; the legacy "
+            "flag will be removed in a future release. To switch to "
+            "multi-tenant: set SUPABASE_URL and SUPABASE_JWT_SECRET in the "
+            "environment and remove the flag.",
+            file=sys.stderr,
+        )
     if not args.legacy_single_user:
         supabase_url = os.getenv("SUPABASE_URL", "").strip()
         supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
