@@ -3,9 +3,9 @@
 > Resume document for the single-user → multi-tenant migration of Aribot.
 > When opening this repo in a fresh session, read this file first.
 
-**Last updated:** 2026-05-15 (end of Phase 3)
+**Last updated:** 2026-05-15 (end of Phase 4)
 **Branch:** `feat/multi-tenant-migration`
-**Commits on branch:** `0323bfa` (baseline) → `5a7d5de` (P1) → `7e9f2ff` (resume doc) → `5da1963` (P2) → `0abd370` (status update) → `8b8d7a7` (P3)
+**Commits on branch:** `0323bfa` (baseline) → `5a7d5de` (P1) → `7e9f2ff` (resume doc) → `5da1963` (P2) → `0abd370` (status) → `8b8d7a7` (P3) → `080b8a0` (status) → `c75d665` (P4)
 
 ---
 
@@ -17,7 +17,7 @@
 | 1 — Foundation | ✅ | `5a7d5de` | `auth_supabase.py`, `meta_db.py`, `tenant_registry.py` additions, deps, env, docs |
 | 2 — Per-user CredentialStore | ✅ | `5da1963` | `_current` → `_by_user` dict; loopback assertion; legacy sentinel threaded |
 | 3 — Bot `--user-id` flag | ✅ | `8b8d7a7` | Bot CLI accepts `--user-id`; all paths route through `TenantRegistry`; legacy mode preserved |
-| 4 — JWT-aware sidecar | ⬜ | — | Endpoints take JWT, scope per-tenant; isolation smoke test |
+| 4 — JWT-aware sidecar | ✅ | `c75d665` | Per-user locks, JWT auth, tenant DB resolution, meta.db audit, startup reconciliation, 8/8 isolation tests pass |
 | 5 — Decommission legacy default | ⬜ | — | Make Supabase env mandatory unless `--legacy-single-user` |
 
 **Behavior change to date:** zero. The sidecar, bot, and iOS app all run exactly as before Phase 1. The new modules are imported by nothing in the production path.
@@ -69,15 +69,15 @@ These were debated in the planning conversation and locked in:
 
 | File | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 |
 | --- | --- | --- | --- | --- | --- |
-| `auth_supabase.py` (new) | ✅ created | LEGACY_OPS_ID exported | — | wired into endpoints | — |
-| `meta_db.py` (new) | ✅ created | — | — | wired into start/stop | — |
-| `tenant_registry.py` | ✅ helpers added | — | — | used in every endpoint | — |
+| `auth_supabase.py` (new) | ✅ created | LEGACY_OPS_ID exported | — | ✅ + legacy_only helper | — |
+| `meta_db.py` (new) | ✅ created | — | — | ✅ wired into start/stop/audit | — |
+| `tenant_registry.py` | ✅ helpers added | — | — | ✅ used everywhere | — |
 | `credential_store.py` | — | ✅ per-user dict | — | — | — |
 | `credential_pipe.py` | — | ✅ 127.0.0.1 assertion | — | — | — |
 | `order_executor.py` | — | — | ✅ accepts `idempotency_db_path` kwarg | — | — |
 | `usdt_paper_bot_v2.py` | — | — | ✅ `--user-id` + `TenantRegistry` paths | — | — |
-| `status_server.py` | — | ✅ threads `LEGACY_OPS_ID` at all 5 sites | — | **biggest refactor: per-user locks, JWT, per-tenant DB** | mandatory Supabase env |
-| `tests/test_multitenant_isolation.py` (new) | — | — | — | created | — |
+| `status_server.py` | — | ✅ threads `LEGACY_OPS_ID` at all 5 sites | — | ✅ per-user locks, JWT, per-tenant DB, audit, reconciliation | mandatory Supabase env |
+| `tests/test_multitenant_isolation.py` (new) | — | — | — | ✅ created — 8/8 pass | — |
 | `.env.example` | ✅ updated | — | — | — | — |
 | `HOW_TO_RUN.md` | ✅ updated | — | — | — | flip default block |
 | `requirements-status-server.txt` | ✅ +PyJWT | — | — | — | — |
