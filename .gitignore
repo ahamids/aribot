@@ -5,6 +5,7 @@ paper_bot_v2_improvements.docx
 .env
 .env.*
 !.env.example
+!deploy/.env.production.example
 kill_switch.flag
 
 # Sidecar runtime state (regenerated on every run)

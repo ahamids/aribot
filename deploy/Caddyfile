@@ -1,0 +1,74 @@
+# =====================================================================
+# Aribot production reverse proxy
+#
+# Substitute via environment variables loaded from /etc/default/caddy:
+#
+#   SITE_ADDRESS  api.your-domain.tld   (the FQDN that resolves to this server)
+#   EMAIL         you@your-domain.tld   (Let's Encrypt registration; expiry warnings)
+#
+# After editing /etc/default/caddy:  systemctl reload caddy
+#
+# Caddy auto-fetches and renews Let's Encrypt certificates. When the DNS
+# A record is set with Cloudflare proxy OFF (grey cloud), the HTTP-01
+# challenge succeeds. Once the cert is issued you can flip Cloudflare
+# proxy to ON (orange cloud); the cert renews via the cached account
+# key without needing to grey-cloud again.
+# =====================================================================
+
+{
+    email {$EMAIL}
+
+    # Trust Cloudflare's edge IPs so X-Forwarded-For reflects the real
+    # client when the orange cloud is on. Caddy 2.7+ recognises the
+    # `cloudflare` keyword and refreshes the IP list periodically.
+    servers {
+        trusted_proxies cloudflare
+    }
+}
+
+{$SITE_ADDRESS} {
+    encode gzip zstd
+
+    header {
+        # 1y HSTS with preload — only enable if you're confident every
+        # subdomain will have HTTPS. Drop `preload` and `includeSubDomains`
+        # if you operate any HTTP-only subdomain.
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "no-referrer"
+        Permissions-Policy        "geolocation=(), microphone=(), camera=()"
+        # Don't advertise Caddy version.
+        -Server
+    }
+
+    # Reverse-proxy everything to the loopback-bound sidecar. The sidecar
+    # itself terminates no TLS (--no-tls in the systemd unit) — Caddy is
+    # the only public-facing TLS endpoint.
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host              {host}
+        header_up X-Real-IP         {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Crypto trading bots hold WebSocket-style long-lived state but
+        # the sidecar's /status, /positions etc. are short request/response.
+        # Generous timeouts let a stuck bot reconciliation respond before
+        # the proxy gives up.
+        transport http {
+            read_timeout  120s
+            write_timeout 120s
+            dial_timeout    5s
+        }
+    }
+
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size      50mb
+            roll_keep      7
+            roll_keep_for  720h
+        }
+        format json
+        # Drop healthz noise from access logs. Comment out if you want it.
+        level INFO
+    }
+}

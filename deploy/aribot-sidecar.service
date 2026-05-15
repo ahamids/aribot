@@ -1,0 +1,77 @@
+[Unit]
+# Multi-tenant FastAPI sidecar (status_server.py). Phase 4+ of the
+# multi-tenant migration; the legacy single-bot unit lives at
+# deploy/aribot.service and is deprecated.
+Description=Aribot multi-tenant sidecar (FastAPI status server)
+Documentation=file:///opt/aribot/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aribot
+Group=aribot
+WorkingDirectory=/opt/aribot
+
+# All secrets and config live here. Mode 600, owned by root:aribot.
+EnvironmentFile=/etc/aribot/aribot.env
+
+# Bind to loopback only — Caddy is the public TLS endpoint and reverse
+# proxies to 127.0.0.1:8787. --no-tls is correct here because Caddy
+# terminates TLS for us.
+ExecStart=/opt/aribot/.venv/bin/python /opt/aribot/status_server.py \
+    --host 127.0.0.1 --port 8787 --no-tls
+
+# Auto-restart on crash, but back off if it's crash-looping.
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=120
+StartLimitBurst=5
+
+# Bots own a graceful shutdown window — the sidecar passes SIGTERM to
+# bot subprocesses, which finish their current cycle (~10-20s) before
+# exiting. 30s is a safe ceiling.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Logs go to a dedicated file (logrotate rotates weekly, keep 8) AND
+# journald. Use `journalctl -u aribot-sidecar` for live tailing or
+# `tail -f /var/log/aribot/sidecar.log` for the rolled file.
+StandardOutput=append:/var/log/aribot/sidecar.log
+StandardError=append:/var/log/aribot/sidecar.log
+SyslogIdentifier=aribot-sidecar
+
+# ─── Hardening ────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Read-only filesystem with explicit writeable carve-outs. The sidecar
+# spawns per-tenant bot subprocesses that write to /var/lib/aribot/.aribot
+# and append to /var/log/aribot/. /tmp is private (PrivateTmp=true) so
+# CredentialPipe's loopback socket binds without leaking to other users.
+ReadWritePaths=/var/lib/aribot /var/log/aribot
+
+# ─── Resource ceilings (CPX11 has 2 GB total) ────────────────────────
+# Sidecar itself stays small (~80 MB). Each bot subprocess is ~100-150 MB
+# with CCXT loaded; budget for ~10 concurrent bots before bumping the box.
+MemoryHigh=1200M
+MemoryMax=1500M
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
