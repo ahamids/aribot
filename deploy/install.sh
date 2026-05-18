@@ -10,7 +10,12 @@
 #
 # Defaults:
 #   --repo-url   https://github.com/ahamids/aribot.git
-#   --ref        feat/multi-tenant-migration   (until merged to main)
+#   --ref        chore/deploy-artifacts   (has both the multi-tenant
+#                                          migration AND the deploy/
+#                                          artifacts — install.sh, Caddyfile,
+#                                          systemd unit, backup.sh, README.
+#                                          Switch to `main` once both
+#                                          branches are merged.)
 #
 # After this finishes, see the "next steps" block it prints.
 # =====================================================================
@@ -18,7 +23,7 @@ set -euo pipefail
 
 # ─── Args ────────────────────────────────────────────────────────────
 REPO_URL="https://github.com/ahamids/aribot.git"
-REPO_REF="feat/multi-tenant-migration"
+REPO_REF="chore/deploy-artifacts"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo-url) REPO_URL="$2"; shift 2 ;;
