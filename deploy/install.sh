@@ -141,6 +141,29 @@ install -d -o aribot -g aribot -m 0750 /var/log/aribot
 # Caddy log dir is created in Phase 3 of the runbook (after caddy is
 # installed) — it needs to be owned by caddy:caddy, not aribot:aribot.
 
+# ─── Phase 6b: headless-Linux keyring backend ────────────────────────
+# Python `keyring` has no usable backend on a headless Linux server
+# (SecretService needs a desktop session that doesn't exist here).
+# We point keyring at keyrings.alt's PlaintextKeyring, stored under the
+# artifact dir's XDG_DATA_HOME (file mode 600, aribot-only). Backups
+# pick this up automatically since it's inside /var/lib/aribot/.
+# Threat model: equivalent to OS keyring on a server — neither protects
+# against root or disk-image theft; both rely on file perms.
+log "configuring file-backed Python keyring for the aribot service user"
+install -d -o aribot -g aribot -m 0750 /var/lib/aribot/.config
+install -d -o aribot -g aribot -m 0750 /var/lib/aribot/.config/python_keyring
+install -d -o aribot -g aribot -m 0750 /var/lib/aribot/.local
+install -d -o aribot -g aribot -m 0750 /var/lib/aribot/.local/share
+install -d -o aribot -g aribot -m 0750 /var/lib/aribot/.local/share/python_keyring
+if [[ ! -f /var/lib/aribot/.config/python_keyring/keyringrc.cfg ]]; then
+    cat > /var/lib/aribot/.config/python_keyring/keyringrc.cfg <<'EOF'
+[backend]
+default-keyring=keyrings.alt.file.PlaintextKeyring
+EOF
+    chown aribot:aribot /var/lib/aribot/.config/python_keyring/keyringrc.cfg
+    chmod 0640 /var/lib/aribot/.config/python_keyring/keyringrc.cfg
+fi
+
 # ─── Phase 7: /etc/aribot config dir ─────────────────────────────────
 install -d -o root -g root -m 0755 /etc/aribot
 

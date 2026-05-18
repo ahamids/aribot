@@ -16,6 +16,15 @@ pynacl>=1.5
 cryptography>=42
 keyring>=24
 
+# Headless Linux backend for `keyring`. On a server there's no desktop
+# session, so SecretService (gnome-keyring/KWallet) is unavailable; this
+# package provides a file-backed PlaintextKeyring that we point at
+# /var/lib/aribot/.local/share/python_keyring/ (mode 600, aribot-only).
+# Selected via /var/lib/aribot/.config/python_keyring/keyringrc.cfg,
+# created by deploy/install.sh. macOS Keychain and Windows Credential
+# Manager are picked up automatically without this on dev machines.
+keyrings.alt>=4
+
 # Multi-tenant JWT validation (auth_supabase.py).
 # - PyJWT: HS256 verification of Supabase access tokens. The [crypto] extra
 #   pulls in `cryptography` (already required above) and keeps RS256 ready

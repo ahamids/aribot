@@ -609,6 +609,27 @@ Common causes:
 - Bucket name mismatch → confirm `B2_BUCKET` in `/etc/aribot/b2.env` matches exactly (case-sensitive).
 - Quota / payment issue → check Backblaze account billing.
 
+### `OS keyring is unreachable: No recommended backend was available`
+The `keyring` Python package can't find a usable backend. On headless
+Linux there's no desktop session for SecretService (gnome-keyring), so
+we use `keyrings.alt`'s file-based backend. install.sh sets this up
+automatically for new deploys. If you upgraded an old box, run on the
+server:
+```bash
+sudo -u aribot /opt/aribot/.venv/bin/pip install --quiet 'keyrings.alt>=4'
+sudo -u aribot mkdir -p /var/lib/aribot/.config/python_keyring /var/lib/aribot/.local/share/python_keyring
+sudo -u aribot tee /var/lib/aribot/.config/python_keyring/keyringrc.cfg > /dev/null <<'EOF'
+[backend]
+default-keyring=keyrings.alt.file.PlaintextKeyring
+EOF
+```
+Then ensure `/etc/aribot/aribot.env` contains:
+```
+XDG_CONFIG_HOME=/var/lib/aribot/.config
+XDG_DATA_HOME=/var/lib/aribot/.local/share
+```
+The bot's X25519 secret lands at `/var/lib/aribot/.local/share/python_keyring/keyring_pass.cfg` (mode 600, aribot-owned). Backed up by `backup.sh`.
+
 ### iOS app can't connect after deploy
 - Wrong base URL → must be `https://api.{YOUR_DOMAIN}` (no trailing slash, with HTTPS).
 - JWT issuer mismatch → app must be signed in to the SAME Supabase project whose JWT secret you put in `/etc/aribot/aribot.env`. Dev project's JWT will fail validation against prod's secret.
