@@ -252,11 +252,14 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/ahamids/aribot/chore/de
 - installs logrotate config
 - does NOT start any service or write any secret
 
-Hand-write the env file:
+Hand-write the env file. Mode 640, owned `root:aribot` — root writes, the
+aribot service user reads via group membership. systemd reads the file
+as root before dropping privileges, but the manual smoke test and any
+`sudo -u aribot` debugging needs group-read access.
 
 ```bash
 # bash (server)
-sudo install -m 600 -o root -g root \
+sudo install -m 640 -o root -g aribot \
     /opt/aribot/deploy/.env.production.example \
     /etc/aribot/aribot.env
 sudo nano /etc/aribot/aribot.env
@@ -480,7 +483,7 @@ Before changing the iOS app's `ARIBOT_BASE_URL` to `https://api.{YOUR_DOMAIN}`:
 - [ ] Operator's own tenant (Bybit testnet keys) successfully placed at least one paper trade end-to-end through the prod sidecar.
 - [ ] One full backup-and-restore cycle drilled. File counts and SQLite row counts match the live tree.
 - [ ] `journalctl -u aribot-sidecar --since '24 hours ago' | grep -iE 'error|traceback|critical'` returns nothing alarming.
-- [ ] `/etc/aribot/aribot.env`, `/etc/aribot/b2.env`, `/etc/aribot/backup-passphrase` all mode 600, owned by root.
+- [ ] `/etc/aribot/aribot.env` is mode 640, owned `root:aribot` (group-readable so the aribot service user can source it). `/etc/aribot/b2.env` and `/etc/aribot/backup-passphrase` stay mode 600, owned `root:root` (only root via cron needs them).
 - [ ] `sudo ufw status` confirms only 22, 80, 443 are open.
 - [ ] `sudo ss -tlnp | grep -v 127.0.0.1` confirms ONLY caddy and ssh listen on public interfaces; sidecar is loopback only.
 - [ ] Supabase prod project's `auth.users` table has only the operator's account.
