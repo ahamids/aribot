@@ -1331,9 +1331,27 @@ def build_app(
         except InvalidTenantId as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+        # The bot's runtime status snapshot is the authoritative source of
+        # truth for `mode` ONLY while a bot is running. For a tenant with
+        # no snapshot (never started, or bot stopped before writing one),
+        # fall back to the persisted preference in the tenant's
+        # config.json. Otherwise a user who clicks "Shadow" in the UI
+        # before they've ever started a bot keeps seeing "Paper" — which
+        # was the actual reported bug.
+        if not user.is_legacy and registry is not None:
+            try:
+                persisted_mode: Mode = registry.get_mode(user.id).upper()  # type: ignore[assignment]
+                if persisted_mode not in ("PAPER", "SHADOW", "LIVE"):
+                    persisted_mode = "PAPER"
+            except Exception:
+                persisted_mode = "PAPER"
+        else:
+            persisted_mode = "PAPER"
+
         if snap is None:
             return StatusOut(
                 version=VERSION,
+                mode=persisted_mode,
                 status=st,
                 lastCycleIso=now_utc.isoformat(),
                 reason=reason,
@@ -1341,8 +1359,8 @@ def build_app(
 
         started = _parse_iso(str(snap.get("started_at", "")))
         uptime = int((now_utc - started).total_seconds()) if started else 0
-        mode_raw = str(snap.get("mode", "PAPER")).upper()
-        mode: Mode = mode_raw if mode_raw in ("PAPER", "SHADOW", "LIVE") else "PAPER"
+        mode_raw = str(snap.get("mode", persisted_mode)).upper()
+        mode: Mode = mode_raw if mode_raw in ("PAPER", "SHADOW", "LIVE") else persisted_mode
 
         return StatusOut(
             version=VERSION,
