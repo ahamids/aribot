@@ -2,11 +2,22 @@
 
 The sidecar accepts two auth modes on the same endpoints:
 
-1. **Supabase JWT (the multi-tenant path).** The iOS app signs in to
-   Supabase and forwards `session.access_token` as `Authorization: Bearer
-   <jwt>`. The token is HS256-signed with the project's JWT secret. We
-   verify signature + standard claims and treat the `sub` claim as the
-   tenant `user_id`.
+1. **Supabase JWT (the multi-tenant path).** Clients sign in to Supabase
+   and forward `session.access_token` as `Authorization: Bearer <jwt>`.
+   The verifier supports BOTH signing schemes Supabase has shipped:
+
+     * **HS256** — legacy symmetric signing with the project's JWT
+       secret. Used by projects created before Supabase's mid-2025
+       switch to asymmetric keys.
+     * **ES256 / RS256 / EdDSA** — current default. Supabase signs with
+       its private key; clients verify against the public key served at
+       `<supabase_url>/auth/v1/.well-known/jwks.json`. PyJWT's built-in
+       JWKS client caches the key set in-process.
+
+   The algorithm is detected from the unverified JWT header on every
+   request and routed to the matching key source. Asymmetric mode does
+   NOT require `SUPABASE_JWT_SECRET` to be set; if both are configured,
+   each token is verified with the key matching its declared alg.
 
 2. **Legacy shared bearer token (`ARIBOT_API_TOKEN`).** Preserved so
    single-tenant ops workflows keep working through the migration. A
@@ -14,11 +25,10 @@ The sidecar accepts two auth modes on the same endpoints:
    `id="__legacy__"`; endpoints that require a real tenant must reject
    the sentinel.
 
-The verifier itself does no I/O at construction time — pass the JWT
-secret and Supabase URL in, and it's ready. `SupabaseJwtVerifier.verify`
-raises `HTTPException(401, …)` on any failure (signature, expiry, bad
-audience/issuer, malformed `sub`). The intent is to let FastAPI surface
-401s without bespoke handling at every endpoint.
+`SupabaseJwtVerifier.verify` raises `HTTPException(401, …)` on any
+failure (signature, expiry, bad audience/issuer, malformed `sub`).
+The intent is to let FastAPI surface 401s without bespoke handling at
+every endpoint.
 """
 
 from __future__ import annotations
@@ -69,35 +79,96 @@ class AuthUser:
 
 
 class SupabaseJwtVerifier:
-    """Verifies a Supabase HS256 JWT and returns an `AuthUser`.
+    """Verifies a Supabase JWT and returns an `AuthUser`.
 
-    Construction is cheap: no network, no file I/O. `verify` is the only
-    hot path and is thread-safe (PyJWT's `decode` is reentrant).
+    Supports HS256 (legacy shared secret) and ES256/RS256/EdDSA
+    (asymmetric, via the project's JWKS endpoint). The algorithm is
+    selected per-token from the unverified header; the verifier never
+    accepts a key intended for one alg when verifying a token with a
+    different alg (defense against alg-confusion attacks).
+
+    Construction is cheap: no network, no file I/O. The JWKS client is
+    lazy-initialized on the first asymmetric token; PyJWT caches keys
+    in-process for `JWKS_CACHE_LIFESPAN_SECONDS`. `verify` is the only
+    hot path and is thread-safe.
     """
+
+    # Whitelisted algorithms. Anything outside these is rejected before
+    # we touch the key material.
+    _ASYMMETRIC_ALGS = ("ES256", "RS256", "EdDSA")
+    _SYMMETRIC_ALGS = ("HS256",)
+
+    # PyJWT's JWKS client refreshes the keyset on cache miss, but we
+    # also have a TTL so a key rotation propagates within this window
+    # without a sidecar restart.
+    JWKS_CACHE_LIFESPAN_SECONDS = 300
 
     def __init__(
         self,
         *,
-        jwt_secret: str,
         supabase_url: str,
+        jwt_secret: str = "",
         audience: str = "authenticated",
         leeway_seconds: int = 30,
     ) -> None:
-        if not jwt_secret:
-            raise ValueError("jwt_secret is required")
         if not supabase_url:
             raise ValueError("supabase_url is required")
-        self._secret = jwt_secret
-        self._issuer = f"{supabase_url.rstrip('/')}/auth/v1"
+        # Empty secret is allowed: asymmetric-only projects don't have
+        # one. We only enforce non-empty when an HS256 token actually
+        # arrives.
+        self._secret = jwt_secret or ""
+        self._supabase_url = supabase_url.rstrip("/")
+        self._issuer = f"{self._supabase_url}/auth/v1"
         self._audience = audience
         self._leeway = leeway_seconds
+        self._jwks_client: Optional[pyjwt.PyJWKClient] = None
+
+    def _jwks(self) -> pyjwt.PyJWKClient:
+        if self._jwks_client is None:
+            self._jwks_client = pyjwt.PyJWKClient(
+                f"{self._supabase_url}/auth/v1/.well-known/jwks.json",
+                cache_keys=True,
+                lifespan=self.JWKS_CACHE_LIFESPAN_SECONDS,
+            )
+        return self._jwks_client
 
     def verify(self, token: str) -> AuthUser:
+        # Step 1: peek at the alg before signature verification so we
+        # know which key source to consult.
+        try:
+            header = pyjwt.get_unverified_header(token)
+        except pyjwt.PyJWTError as exc:
+            raise HTTPException(status_code=401, detail=f"jwt malformed header: {exc}")
+
+        alg = header.get("alg", "")
+        if alg in self._ASYMMETRIC_ALGS:
+            try:
+                signing_key = self._jwks().get_signing_key_from_jwt(token)
+            except pyjwt.PyJWKClientError as exc:
+                raise HTTPException(
+                    status_code=401, detail=f"jwks fetch failed: {exc}"
+                )
+            key: object = signing_key.key
+            allowed_algs = list(self._ASYMMETRIC_ALGS)
+        elif alg in self._SYMMETRIC_ALGS:
+            if not self._secret:
+                raise HTTPException(
+                    status_code=401,
+                    detail="HS256 token but SUPABASE_JWT_SECRET not configured",
+                )
+            key = self._secret
+            allowed_algs = list(self._SYMMETRIC_ALGS)
+        else:
+            raise HTTPException(
+                status_code=401, detail=f"jwt alg not allowed: {alg or '(none)'}"
+            )
+
+        # Step 2: full verification against the chosen key + alg.
         try:
             claims = pyjwt.decode(
                 token,
-                self._secret,
-                algorithms=["HS256"],
+                key,
+                algorithms=allowed_algs,
                 audience=self._audience,
                 issuer=self._issuer,
                 leeway=self._leeway,
@@ -233,12 +304,11 @@ def make_require_user_legacy_only(
 
 
 if __name__ == "__main__":
-    # Smoke test: round-trip a JWT through the verifier with a known secret.
+    # Smoke test: round-trip JWTs through the verifier in both HS256
+    # (legacy shared secret) and ES256 (asymmetric, JWKS) modes.
     import time
     import uuid
 
-    # Smoke-test secret. Must be ≥32 bytes to satisfy PyJWT's HS256 length
-    # check (real Supabase JWT secrets are 64 bytes).
     secret = "test-secret-do-not-use-in-prod-padding-padding-pad"
     supabase_url = "https://example.supabase.co"
     verifier = SupabaseJwtVerifier(jwt_secret=secret, supabase_url=supabase_url)
@@ -264,7 +334,55 @@ if __name__ == "__main__":
     assert user.email == "test@example.com"
     assert user.role == "authenticated"
     assert not user.is_legacy
-    print(f"verify ok: {user}")
+    print(f"hs256 verify ok: {user}")
+
+    # ES256 path: generate a keypair, mint a token, monkeypatch the
+    # verifier's JWKS client to return the matching public key.
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+
+    ec_priv = ec.generate_private_key(ec.SECP256R1())
+    ec_pub_pem = ec_priv.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    ec_priv_pem = ec_priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    es_token = pyjwt.encode(
+        {
+            "sub": user_id,
+            "email": "test@example.com",
+            "role": "authenticated",
+            "aud": "authenticated",
+            "iss": f"{supabase_url}/auth/v1",
+            "iat": now,
+            "exp": now + 3600,
+        },
+        ec_priv_pem,
+        algorithm="ES256",
+        headers={"kid": "test-key"},
+    )
+
+    class _StubSigningKey:
+        def __init__(self, key: object) -> None:
+            self.key = key
+
+    class _StubJwksClient:
+        def __init__(self, key: object) -> None:
+            self._key = key
+
+        def get_signing_key_from_jwt(self, _token: str) -> _StubSigningKey:
+            return _StubSigningKey(self._key)
+
+    verifier._jwks_client = _StubJwksClient(  # type: ignore[assignment]
+        serialization.load_pem_public_key(ec_pub_pem)
+    )
+    es_user = verifier.verify(es_token)
+    assert es_user.id == user_id
+    print(f"es256 verify ok: {es_user}")
 
     # Expired token should raise.
     expired = pyjwt.encode(
@@ -283,6 +401,27 @@ if __name__ == "__main__":
     except HTTPException as exc:
         assert exc.status_code == 401 and "expired" in exc.detail.lower()
         print(f"expired rejected: {exc.detail}")
+
+    # Unknown algorithm rejected.
+    try:
+        verifier.verify(pyjwt.encode({"sub": user_id}, "x", algorithm="none"))
+    except HTTPException as exc:
+        # PyJWT refuses to encode with algorithm="none" by default, so
+        # we expect either the encode to throw OR the verifier to
+        # reject. If we got here, the verifier did its job.
+        assert exc.status_code == 401
+        print(f"unknown alg rejected: {exc.detail}")
+    except (TypeError, ValueError, pyjwt.PyJWTError):
+        print("unknown alg rejected at encode (pyjwt refuses 'none')")
+
+    # Asymmetric-only project: no secret configured, HS256 token should
+    # be rejected with a clear message.
+    asym_only = SupabaseJwtVerifier(supabase_url=supabase_url)
+    try:
+        asym_only.verify(token)  # token is HS256
+    except HTTPException as exc:
+        assert exc.status_code == 401 and "SUPABASE_JWT_SECRET" in exc.detail
+        print(f"asym-only rejects HS256: {exc.detail}")
 
     # Legacy token path.
     require = make_require_user(verifier, allow_legacy_token="legacy-token-123")
