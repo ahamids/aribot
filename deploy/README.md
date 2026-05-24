@@ -220,26 +220,16 @@ ssh -i $env:USERPROFILE\.ssh\aribot_ed25519 aribot-admin@{SERVER_IPV4}
 
 **Time:** ~20 min
 
-**Prerequisite:** Push both feature branches to GitHub so the server can fetch them.
-
-```powershell
-# PowerShell (Windows local) — one-time push if you haven't yet
-cd C:\git\aribot-og
-git push -u origin feat/multi-tenant-migration chore/deploy-artifacts
-```
-
-The deploy artifacts (install.sh, Caddyfile, systemd unit, backup.sh, this README)
-live on `chore/deploy-artifacts`. That branch is itself based on
-`feat/multi-tenant-migration`, so checking it out gives you both the multi-tenant
-code AND the deployment tooling.
+**Prerequisite:** `main` on GitHub must be up to date — it contains the
+multi-tenant migration AND the deploy/ artifacts.
 
 ```bash
 # bash (server)
 sudo apt-get install -y git
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/ahamids/aribot/chore/deploy-artifacts/deploy/install.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/ahamids/aribot/main/deploy/install.sh)
 
 # OR if you want to inspect first:
-# sudo git clone --branch chore/deploy-artifacts https://github.com/ahamids/aribot.git /opt/aribot
+# sudo git clone --branch main https://github.com/ahamids/aribot.git /opt/aribot
 # sudo bash /opt/aribot/deploy/install.sh
 ```
 
