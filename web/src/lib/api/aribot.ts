@@ -52,6 +52,26 @@ export interface CredentialsStatusResponse {
   validatedAtIso?: string;
 }
 
+export interface PubkeyResponse {
+  publicKey: string;
+  fingerprint: string;
+  algo: string;
+}
+
+export interface CredentialsAckResponse {
+  ok: boolean;
+  detail: string;
+  fingerprint?: string;
+}
+
+export interface CredentialsPushBody {
+  ciphertext: string;
+  nonce: string;
+  senderPublicKey: string;
+  timestampIso: string;
+  counter: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -134,4 +154,12 @@ export const aribotApi = {
   clearKill: () => request("/kill", { method: "DELETE" }),
   credentialsStatus: () =>
     request<CredentialsStatusResponse>("/credentials/status"),
+  pubkey: () => request<PubkeyResponse>("/pubkey"),
+  pushCredentials: (body: CredentialsPushBody) =>
+    request<CredentialsAckResponse>("/credentials", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteCredentials: () =>
+    request<CredentialsAckResponse>("/credentials", { method: "DELETE" }),
 };

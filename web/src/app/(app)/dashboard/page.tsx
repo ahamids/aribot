@@ -238,15 +238,13 @@ function CredentialsCard({
         credentials.loaded ? "bg-paper" : "bg-cream-deep"
       }`}
     >
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
             Bybit API keys
           </div>
           <div className="mt-1 text-lg font-black text-plum">
-            {credentials.loaded
-              ? "Loaded in memory"
-              : "Not configured"}
+            {credentials.loaded ? "Loaded in memory" : "Not configured"}
           </div>
           {credentials.fingerprint && (
             <div className="mt-1 text-xs font-mono text-plum-mid">
@@ -254,12 +252,19 @@ function CredentialsCard({
             </div>
           )}
           {!credentials.loaded && (
-            <p className="mt-2 text-sm text-plum-mid">
-              The vault encrypts your Bybit keys in your browser and pushes
-              the ciphertext to the backend. Coming in M3.
+            <p className="mt-2 text-sm text-plum-mid max-w-md">
+              Your keys are encrypted in your browser before they ever
+              leave the device. Set a passphrase, save a recovery code,
+              push the ciphertext to the bot.
             </p>
           )}
         </div>
+        <Link
+          href="/vault"
+          className="sticker outline-plum-thick rounded-[14px] bg-coral text-plum px-5 py-2.5 font-black inline-flex items-center justify-center transition hover:translate-y-[-2px]"
+        >
+          {credentials.loaded ? "Manage vault" : "Set up vault"}
+        </Link>
       </div>
     </div>
   );
