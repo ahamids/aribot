@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+/* Aribot design tokens — ported from app/src/theme/tokens.ts (Expo app).
+   "Cartoon-meets-trust" palette. Reserve pnlRed/pnlGreen exclusively for
+   PnL, direction, kill switch, LIVE warnings. */
+@theme inline {
+  --color-cream: #fff4e6;
+  --color-cream-deep: #ffe9c9;
+  --color-paper: #fffaf1;
+
+  --color-coral: #ff8b66;
+  --color-coral-deep: #e66a45;
+  --color-yellow: #ffc93c;
+  --color-yellow-deep: #e8a91a;
+  --color-mint: #7dd3ae;
+  --color-mint-deep: #4da67e;
+  --color-peri: #8b9dff;
+  --color-peri-deep: #6877d6;
+
+  --color-plum: #2d1f47;
+  --color-plum-mid: #5b4880;
+  --color-plum-soft: #9b8fb8;
+
+  --color-pnl-green: #30a46c;
+  --color-pnl-green-soft: #c8efd9;
+  --color-pnl-red: #e5484d;
+  --color-pnl-red-soft: #f9c9ca;
+
+  --radius-pill: 9999px;
+  --radius-xl: 32px;
+  --radius-l: 24px;
+  --radius-m: 18px;
+  --radius-s: 12px;
+
+  --font-sans: ui-rounded, "SF Pro Rounded", system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+:root {
+  --bg: var(--color-cream);
+  --fg: var(--color-plum);
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-feature-settings: "tnum"; /* tabular nums for digits */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Sticker shadow — the signature Aribot effect: hard offset + ambient soft.
+   Use as `.sticker` on any container. */
+.sticker {
+  box-shadow:
+    0 4px 0 0 var(--color-plum),
+    0 10px 22px -2px rgb(45 31 71 / 0.14);
+}
+
+.sticker-coral {
+  box-shadow:
+    0 4px 0 0 var(--color-coral-deep),
+    0 10px 22px -2px rgb(230 106 69 / 0.18);
+}
+
+/* Heavy outline pattern — matches the iOS app's ol2/ol3/ol4 borders */
+.outline-plum {
+  border: 2px solid var(--color-plum);
+}
+.outline-plum-thick {
+  border: 3px solid var(--color-plum);
+}
