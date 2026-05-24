@@ -313,10 +313,15 @@ class CredentialStore:
         trade_secret = str(payload["tradeSecret"]).strip()
 
         if read_key == trade_key:
-            return CredentialPushResult(
-                ok=False,
-                detail="read and trade API keys must be different keypairs",
-                status_code=422,
+            # Using one key for both scopes is supported but reduces blast-
+            # radius separation if the key leaks. We log a warning so an
+            # operator scanning logs can flag tenants on the "single-key"
+            # plan, and let the push proceed. Bybit's own permission check
+            # still ensures the key has both read + trade scopes.
+            log.warning(
+                "tenant %s pushed credentials with identical read/trade key; "
+                "permission isolation reduced",
+                uid,
             )
 
         # Validate against Bybit. Reuses the existing logic so the rules are
