@@ -18,12 +18,18 @@
 {
     email {$EMAIL}
 
-    # Trust Cloudflare's edge IPs so X-Forwarded-For reflects the real
-    # client when the orange cloud is on. Caddy 2.7+ recognises the
-    # `cloudflare` keyword and refreshes the IP list periodically.
-    servers {
-        trusted_proxies cloudflare
-    }
+    # NOTE: The `trusted_proxies cloudflare` directive (which auto-loads
+    # Cloudflare's edge IPs) requires the third-party module
+    # `caddy-cloudflare-ip` and a custom Caddy build via xcaddy. The
+    # apt-installed Caddy package does NOT include it, so the directive
+    # is disabled here. Consequence: X-Forwarded-For shows Cloudflare's
+    # edge IP, not the real client. Acceptable for the initial deploy;
+    # build a custom Caddy with xcaddy when client-IP-aware rate limiting
+    # or per-IP abuse tracking becomes important.
+    #
+    # servers {
+    #     trusted_proxies cloudflare
+    # }
 }
 
 {$SITE_ADDRESS} {

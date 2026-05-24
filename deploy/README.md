@@ -314,6 +314,14 @@ EOF
 # Caddy needs its own log dir
 sudo install -d -o caddy -g caddy -m 0755 /var/log/caddy
 
+# CRITICAL: the apt-installed caddy.service does NOT load /etc/default/caddy
+# by default. Install a systemd drop-in so the env vars above are visible
+# to Caddy at startup.
+sudo install -d -m 0755 /etc/systemd/system/caddy.service.d
+sudo cp /opt/aribot/deploy/caddy-systemd-override.conf \
+    /etc/systemd/system/caddy.service.d/override.conf
+sudo systemctl daemon-reload
+
 # Restart the sidecar in background for this test (Phase 4 makes it permanent)
 sudo -u aribot bash -c '
   set -a; source /etc/aribot/aribot.env; set +a
@@ -322,7 +330,7 @@ sudo -u aribot bash -c '
     --host 127.0.0.1 --port 8787 --no-tls > /tmp/sidecar.log 2>&1 &
 '
 
-sudo systemctl reload caddy
+sudo systemctl restart caddy   # restart (not reload) so EnvironmentFile applies
 ```
 
 Wait ~30 sec for cert issuance, then from your Windows machine:
@@ -647,6 +655,7 @@ These do not block production launch:
 |---|---|
 | `deploy/install.sh` | Idempotent Ubuntu 24.04 bootstrap |
 | `deploy/Caddyfile` | Reverse proxy + Let's Encrypt config |
+| `deploy/caddy-systemd-override.conf` | systemd drop-in that loads /etc/default/caddy (the apt unit doesn't by default) |
 | `deploy/aribot-sidecar.service` | systemd unit for the multi-tenant sidecar (current) |
 | `deploy/aribot.service` | **Deprecated** — legacy single-tenant systemd unit (pre-migration) |
 | `deploy/backup.sh` | Streamed encrypted backup → B2 |

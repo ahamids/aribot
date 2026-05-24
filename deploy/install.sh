@@ -102,13 +102,17 @@ fi
 if [[ ! -d /opt/aribot/.git ]]; then
     log "cloning ${REPO_URL} (${REPO_REF}) to /opt/aribot"
     git clone --branch "${REPO_REF}" "${REPO_URL}" /opt/aribot
+    chown -R aribot:aribot /opt/aribot
 else
-    log "/opt/aribot already cloned; fetching latest refs"
-    git -C /opt/aribot fetch --all --prune
-    log "  current HEAD: $(git -C /opt/aribot rev-parse --short HEAD)"
+    log "/opt/aribot already cloned; fetching latest refs as aribot user"
+    # Run git as the owning user. On a re-run, /opt/aribot is owned by
+    # aribot:aribot from the first run; git refuses with "dubious
+    # ownership" if root tries to operate on it. sudo -u aribot keeps
+    # git happy and avoids needing safe.directory exceptions.
+    sudo -u aribot git -C /opt/aribot fetch --all --prune
+    log "  current HEAD: $(sudo -u aribot git -C /opt/aribot rev-parse --short HEAD)"
     log "  to update: cd /opt/aribot && sudo -u aribot git checkout <ref>"
 fi
-chown -R aribot:aribot /opt/aribot
 
 # ─── Phase 5: venv + Python deps ─────────────────────────────────────
 if [[ ! -d /opt/aribot/.venv ]]; then
