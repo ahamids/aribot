@@ -1463,9 +1463,14 @@ def build_app(
         # falls back to expected_token when no separate vault token is set).
         require_user_jwt = make_require_user_legacy_only(cfg.expected_vault_token)
 
-    @app.get("/healthz")
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
     def healthz() -> dict:
         # Liveness for the sidecar; unauthenticated by design.
+        # Accept HEAD too — uptime monitors (UptimeRobot, Pingdom, etc.)
+        # default to HEAD to save bandwidth, and FastAPI's @app.get()
+        # does NOT auto-alias HEAD like Starlette does at the Mount
+        # level. Without this, monitors get 405 and page on every
+        # check.
         return {"ok": True, "version": VERSION, "multiTenant": multi_tenant}
 
     # ──────────────────────────────────────────────────────────────────────
