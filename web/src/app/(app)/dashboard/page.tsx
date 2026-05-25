@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { signOut } from "@/app/actions/auth";
 import {
   aribotApi,
   ApiError,
@@ -17,6 +16,7 @@ import { PositionsCard } from "./positions-card";
 import { TradesCard } from "./trades-card";
 import { EquitySparkline } from "./equity-sparkline";
 import { ControlsPanel } from "./controls-panel";
+import { AppNav } from "../nav";
 
 export const dynamic = "force-dynamic";
 
@@ -89,24 +89,7 @@ export default async function DashboardPage() {
 
   return (
     <main className="flex-1 flex flex-col">
-      <header className="px-6 py-6 sm:px-12 flex items-center justify-between">
-        <Link href="/" className="text-2xl font-black tracking-tight text-plum">
-          aribot
-        </Link>
-        <div className="flex items-center gap-3">
-          <span className="hidden sm:inline text-sm text-plum-mid">
-            {data.user.email}
-          </span>
-          <form action={signOut}>
-            <button
-              type="submit"
-              className="outline-plum rounded-[12px] bg-paper text-plum px-4 py-2 text-sm font-bold hover:bg-cream-deep"
-            >
-              Sign out
-            </button>
-          </form>
-        </div>
-      </header>
+      <AppNav email={data.user.email ?? ""} active="dashboard" />
 
       <section className="flex-1 px-6 py-8 sm:px-12">
         <div className="mx-auto w-full max-w-3xl flex flex-col gap-6">

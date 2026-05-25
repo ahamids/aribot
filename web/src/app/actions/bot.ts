@@ -37,3 +37,39 @@ export async function setBotMode(
     };
   }
 }
+
+export async function setBybitTestnet(
+  _state: BotActionState,
+  formData: FormData,
+): Promise<BotActionState> {
+  const raw = formData.get("testnet");
+  if (raw !== "true" && raw !== "false") {
+    return { ok: false, message: "Invalid testnet value." };
+  }
+  const testnet = raw === "true";
+
+  try {
+    const res = await aribotApi.setTestnet(testnet);
+    if (!res.ok) {
+      return {
+        ok: false,
+        message:
+          res.detail || `Could not switch to ${testnet ? "testnet" : "mainnet"}.`,
+      };
+    }
+    revalidatePath("/dashboard");
+    revalidatePath("/settings");
+    return {
+      ok: true,
+      message: `Bybit environment set to ${res.testnet ? "TESTNET" : "MAINNET"}.`,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      message:
+        e instanceof ApiError
+          ? `${e.message}${e.body && typeof e.body === "object" && "detail" in e.body ? ` — ${(e.body as { detail: string }).detail}` : ""}`
+          : "Unexpected error talking to backend.",
+    };
+  }
+}

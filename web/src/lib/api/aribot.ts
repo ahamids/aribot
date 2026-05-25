@@ -47,6 +47,13 @@ export interface ModeResponse {
   runningPid?: number | null;
 }
 
+export interface TestnetResponse {
+  ok: boolean;
+  testnet: boolean | null;
+  detail: string;
+  runningPid?: number | null;
+}
+
 export interface CredentialsStatusResponse {
   loaded: boolean;
   fingerprint?: string;
@@ -212,6 +219,11 @@ export const aribotApi = {
     request<ModeResponse>("/mode", {
       method: "POST",
       body: JSON.stringify({ mode }),
+    }),
+  setTestnet: (testnet: boolean) =>
+    request<TestnetResponse>("/testnet", {
+      method: "POST",
+      body: JSON.stringify({ testnet }),
     }),
   start: () => request("/start", { method: "POST" }),
   stop: () => request("/stop", { method: "POST" }),
