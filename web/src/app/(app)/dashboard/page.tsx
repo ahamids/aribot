@@ -16,6 +16,7 @@ import { AutoRefresh } from "./auto-refresh";
 import { PositionsCard } from "./positions-card";
 import { TradesCard } from "./trades-card";
 import { EquitySparkline } from "./equity-sparkline";
+import { ControlsPanel } from "./controls-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -111,17 +112,19 @@ export default async function DashboardPage() {
         <div className="mx-auto w-full max-w-3xl flex flex-col gap-6">
           <ConnectionCard snap={snap} />
 
+          {snap.status?.status === "killed" && <KillSwitchBanner />}
+
           {snap.status && (
             <>
               <StatusCard status={snap.status} equity={snap.equity} />
+              <ControlsPanel
+                status={snap.status}
+                credentialsLoaded={snap.credentials?.loaded ?? false}
+              />
               <ModePicker currentMode={snap.status.mode} />
               <PositionsCard positions={snap.positions} />
               <TradesCard trades={snap.trades} />
               <CredentialsCard credentials={snap.credentials} />
-              <ControlsCard
-                status={snap.status}
-                credentialsLoaded={snap.credentials?.loaded ?? false}
-              />
             </>
           )}
         </div>
@@ -176,10 +179,12 @@ function StatusCard({
   const pill = {
     running: { label: "Running", bg: "bg-mint" },
     starting: { label: "Starting", bg: "bg-yellow" },
+    stopping: { label: "Stopping", bg: "bg-yellow" },
     stopped: { label: "Stopped", bg: "bg-paper" },
     stale: { label: "Stale", bg: "bg-yellow" },
     killed: { label: "Kill switch", bg: "bg-pnl-red-soft" },
     crashed: { label: "Crashed", bg: "bg-pnl-red-soft" },
+    error: { label: "Error", bg: "bg-pnl-red-soft" },
   }[status.status] ?? { label: status.status, bg: "bg-paper" };
 
   return (
@@ -320,53 +325,22 @@ function CredentialsCard({
   );
 }
 
-function ControlsCard({
-  status,
-  credentialsLoaded,
-}: {
-  status: StatusResponse;
-  credentialsLoaded: boolean;
-}) {
-  const canStart =
-    credentialsLoaded && ["stopped", "stale", "crashed"].includes(status.status);
-  const canStop = status.status === "running";
-
+function KillSwitchBanner() {
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
-      <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
-        Controls
+    <div className="outline-plum-thick rounded-[18px] bg-pnl-red-soft p-4 sticker flex items-center gap-3">
+      <span
+        aria-hidden
+        className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-pnl-red text-paper font-black text-lg shrink-0"
+      >
+        !
+      </span>
+      <div className="flex-1">
+        <p className="font-black text-plum">Kill switch is active.</p>
+        <p className="mt-0.5 text-sm text-plum-mid">
+          The bot is stopped and refuses to restart until you clear the
+          switch in the Controls panel below.
+        </p>
       </div>
-      <div className="mt-3 flex flex-wrap gap-3">
-        <button
-          disabled={!canStart}
-          className="sticker outline-plum-thick rounded-[12px] bg-mint text-plum px-5 py-2.5 font-black disabled:opacity-50 disabled:translate-y-0 transition hover:translate-y-[-2px]"
-          title={
-            !credentialsLoaded
-              ? "Add Bybit keys first (M3)"
-              : !canStart
-                ? "Bot already running"
-                : "Start the bot"
-          }
-        >
-          Start
-        </button>
-        <button
-          disabled={!canStop}
-          className="outline-plum rounded-[12px] bg-paper text-plum px-5 py-2.5 font-bold disabled:opacity-50 hover:bg-cream-deep"
-        >
-          Stop
-        </button>
-        <button
-          disabled={status.status === "killed"}
-          className="outline-plum rounded-[12px] bg-pnl-red-soft text-plum px-5 py-2.5 font-bold disabled:opacity-50"
-        >
-          Kill switch
-        </button>
-      </div>
-      <p className="mt-3 text-xs text-plum-soft">
-        Controls are wired to the backend but the M2 cut keeps them disabled
-        until vault (M3) and the full control loop (M5) ship.
-      </p>
     </div>
   );
 }

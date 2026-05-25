@@ -18,10 +18,12 @@ export type BotMode = "PAPER" | "SHADOW" | "LIVE";
 export type BotStatus =
   | "running"
   | "stopped"
+  | "stopping"
   | "stale"
   | "killed"
   | "starting"
-  | "crashed";
+  | "crashed"
+  | "error";
 
 export interface StatusResponse {
   version: string;
