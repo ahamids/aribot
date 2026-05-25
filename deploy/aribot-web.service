@@ -1,0 +1,71 @@
+[Unit]
+# Aribot web frontend — Next.js 16 standalone server at 127.0.0.1:3000.
+# Caddy reverse-proxies aribot.app + www.aribot.app to this. Lives next
+# to aribot-sidecar.service (the FastAPI sidecar on :8787).
+Description=Aribot web frontend (Next.js)
+Documentation=file:///opt/aribot/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aribot
+Group=aribot
+WorkingDirectory=/opt/aribot/web/.next/standalone
+
+# Build-time env (NEXT_PUBLIC_*) is baked into the bundle by `next build`.
+# Runtime env covers anything the server-side actions read at request time
+# — currently just HOSTNAME + PORT for the standalone server. Supabase
+# URL + anon key are read from the build, NOT this file.
+Environment="NODE_ENV=production"
+Environment="HOSTNAME=127.0.0.1"
+Environment="PORT=3000"
+EnvironmentFile=-/etc/aribot/web.env
+
+ExecStart=/usr/bin/node server.js
+
+# Auto-restart on crash with back-off if it's looping.
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=120
+StartLimitBurst=5
+
+# Logs to a dedicated file + journald.
+StandardOutput=append:/var/log/aribot/web.log
+StandardError=append:/var/log/aribot/web.log
+SyslogIdentifier=aribot-web
+
+# ─── Hardening ────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Read-only filesystem with explicit writeable carve-outs.
+# Next.js writes to .next/cache for its image optimizer + ISR — we keep
+# that path writable. Logs go to /var/log/aribot. Everything else is RO.
+ReadWritePaths=/opt/aribot/web/.next/cache /var/log/aribot
+
+# ─── Resource ceilings ────────────────────────────────────────────────
+# Node servers tend to balloon on memory leaks. Tighten before they
+# matter. 700MB high water mark is well above expected (~80-150MB at
+# steady state for our route surface).
+MemoryHigh=700M
+MemoryMax=1G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
