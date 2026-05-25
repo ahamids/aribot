@@ -70,7 +70,7 @@ from tenant_registry import (
 from tls_cert import TlsArtifacts, ensure_tls
 
 
-Status = Literal["running", "stopped", "error", "killed"]
+Status = Literal["running", "stopped", "stopping", "error", "killed"]
 Mode = Literal["PAPER", "SHADOW", "LIVE"]
 
 
@@ -661,6 +661,27 @@ def start_bot(
         else:
             spawn_env["ARIBOT_USER_ID"] = user_id
             spawn_env["ARIBOT_ARTIFACT_DIR"] = str(cfg.artifact_dir)
+            # Propagate the tenant's persisted BOT_MODE + BYBIT_TESTNET
+            # from registry/config.json so the bot picks up the user's
+            # choices instead of the global /etc/aribot/aribot.env
+            # defaults. Without this, /mode + tenant testnet flips are
+            # silently ignored at bot spawn time.
+            if registry is not None:
+                try:
+                    spawn_env["BOT_MODE"] = registry.get_mode(user_id)
+                    spawn_env["BYBIT_TESTNET"] = (
+                        "true" if registry.get_testnet(user_id) else "false"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Don't fail the spawn over a registry hiccup — bot
+                    # will fall back to env defaults and the user can
+                    # /stop + /start after the issue is sorted.
+                    print(
+                        f"[status_server] warning: could not load tenant "
+                        f"config for {user_id}: {exc}; bot will use global "
+                        f"BOT_MODE/BYBIT_TESTNET",
+                        file=sys.stderr,
+                    )
 
         try:
             proc = subprocess.Popen(
@@ -726,6 +747,23 @@ def start_bot(
             lock.release()
         except RuntimeError:
             pass
+
+
+def _read_kill_intent(kill_path: Path) -> str:
+    """Read the first `intent:` line out of a kill switch flag file.
+
+    Returns 'stop', 'kill', or '' (unknown / unreadable). The flag's
+    presence is what actually stops the bot; intent is purely for status
+    reporting + post-mortem.
+    """
+    try:
+        text = kill_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.lower().startswith("intent:"):
+            return line.split(":", 1)[1].strip().lower()
+    return ""
 
 
 def _write_kill_switch_at(kill_path: Path, intent: Literal["stop", "kill"]) -> Optional[str]:
@@ -1305,6 +1343,21 @@ def build_app(
     def _derive_status_for(user: AuthUser, snap: Optional[dict], now_utc: datetime.datetime) -> tuple[Status, Optional[str]]:
         kill_path = _tenant_kill_path(user)
         if kill_path.exists():
+            # Read the flag's intent so the UI can distinguish a graceful
+            # /stop (intent: stop) from an emergency /kill (intent: kill).
+            # The bot treats both identically — exits at next cycle — but
+            # operators and the UI need to tell them apart.
+            intent = _read_kill_intent(kill_path)
+            pid = int(snap.get("pid", 0)) if snap else 0
+            pid_alive = bool(pid) and _pid_alive(pid)
+            if intent == "stop":
+                # Graceful stop in progress; once the bot actually exits we
+                # roll forward to "stopped" so the UI re-enables Start.
+                if pid_alive:
+                    return "stopping", f"stop_requested:{kill_path.name}"
+                return "stopped", f"stop_complete:{kill_path.name}"
+            # Anything else (intent: kill, unreadable file, etc.) treats as
+            # the emergency case — UI requires an explicit clear.
             return "killed", f"kill_switch_present:{kill_path.name}"
         if snap is None:
             return "stopped", "snapshot_missing"
