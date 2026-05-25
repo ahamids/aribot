@@ -1412,8 +1412,21 @@ def build_app(
 
         started = _parse_iso(str(snap.get("started_at", "")))
         uptime = int((now_utc - started).total_seconds()) if started else 0
-        mode_raw = str(snap.get("mode", persisted_mode)).upper()
-        mode: Mode = mode_raw if mode_raw in ("PAPER", "SHADOW", "LIVE") else persisted_mode
+        # The snapshot's `mode` only reflects what the currently-running
+        # bot believes — it's a captured state, not a live one. If the
+        # bot is no longer running (stopped, killed, errored, stale), the
+        # snapshot's mode is historical and a subsequent POST /mode that
+        # updated config.json should win. Trust snap.mode only for
+        # "running" / "stopping" states where the bot's view is the
+        # current truth.
+        snap_mode_authoritative = st in ("running", "stopping")
+        if snap_mode_authoritative:
+            mode_raw = str(snap.get("mode", persisted_mode)).upper()
+            mode: Mode = (
+                mode_raw if mode_raw in ("PAPER", "SHADOW", "LIVE") else persisted_mode
+            )
+        else:
+            mode = persisted_mode
 
         return StatusOut(
             version=VERSION,
