@@ -91,8 +91,8 @@ export default async function DashboardPage() {
     <main className="flex-1 flex flex-col">
       <AppNav email={data.user.email ?? ""} active="dashboard" />
 
-      <section className="flex-1 px-6 py-8 sm:px-12">
-        <div className="mx-auto w-full max-w-3xl flex flex-col gap-6">
+      <section className="flex-1 px-4 py-6 sm:px-12 sm:py-8">
+        <div className="mx-auto w-full max-w-3xl flex flex-col gap-4 sm:gap-6">
           <ConnectionCard snap={snap} />
 
           {snap.status?.status === "killed" && <KillSwitchBanner />}

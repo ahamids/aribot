@@ -50,10 +50,10 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
     <main className="flex-1 flex flex-col">
       <AppNav email={data.user.email ?? ""} active="history" />
 
-      <section className="flex-1 px-6 py-8 sm:px-12">
-        <div className="mx-auto w-full max-w-4xl flex flex-col gap-6">
+      <section className="flex-1 px-4 py-6 sm:px-12 sm:py-8">
+        <div className="mx-auto w-full max-w-4xl flex flex-col gap-4 sm:gap-6">
           <div>
-            <h1 className="text-3xl font-black text-plum">Trade history</h1>
+            <h1 className="text-2xl sm:text-3xl font-black text-plum">Trade history</h1>
             <p className="mt-2 text-plum-mid">
               Closed trades — newest first. Backend caps at the last{" "}
               <strong>{MAX_DAYS} days</strong>; longer windows coming in M7.

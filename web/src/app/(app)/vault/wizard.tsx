@@ -588,8 +588,13 @@ function SetupHeader({ step }: { step: 1 | 2 | 3 | 4 }) {
   const steps = ["Passphrase", "Recovery code", "Bybit keys", "Push"];
   return (
     <div>
-      <h1 className="text-3xl font-black text-plum">Set up your vault</h1>
-      <div className="mt-4 flex gap-2">
+      <h1 className="text-2xl sm:text-3xl font-black text-plum">
+        Set up your vault
+      </h1>
+      {/* On mobile, the 4 step tiles wrap to two rows instead of
+          overflowing horizontally with no scroll affordance. On sm+
+          they sit on a single row. */}
+      <div className="mt-4 flex flex-wrap gap-2">
         {steps.map((label, i) => {
           const n = (i + 1) as 1 | 2 | 3 | 4;
           const active = n === step;
@@ -597,7 +602,7 @@ function SetupHeader({ step }: { step: 1 | 2 | 3 | 4 }) {
           return (
             <div
               key={label}
-              className={`outline-plum rounded-[10px] px-3 py-1.5 text-xs font-bold ${
+              className={`outline-plum rounded-[10px] px-2.5 py-1.5 text-xs font-bold whitespace-nowrap ${
                 active
                   ? "sticker bg-coral text-plum"
                   : done
