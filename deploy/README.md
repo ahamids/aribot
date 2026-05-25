@@ -451,7 +451,7 @@ sudo chmod 644 /etc/cron.d/aribot-backup
 sudo mkdir -p /tmp/restore-test && cd /tmp/restore-test
 set -a; source /etc/aribot/b2.env; set +a
 b2 account authorize "$B2_APPLICATION_KEY_ID" "$B2_APPLICATION_KEY"
-LATEST=$(b2 ls --recursive "$B2_BUCKET" | awk '{print $NF}' | grep -E '^aribot-backup-.*\.tar\.gz\.gpg$' | sort | tail -1)
+LATEST=$(b2 ls --recursive "b2://$B2_BUCKET" | awk '{print $NF}' | grep -E '^aribot-backup-.*\.tar\.gz\.gpg$' | sort | tail -1)
 sudo b2 file download "b2://$B2_BUCKET/$LATEST" backup.tar.gz.gpg
 sudo gpg --batch --passphrase-file /etc/aribot/backup-passphrase --decrypt backup.tar.gz.gpg | tar -xz
 sudo ls -la .aribot/
@@ -622,7 +622,7 @@ Server gone, blank Hetzner box, need to restore:
 # bash (new server, after Phase 1 hardening + Phase 2 install.sh)
 set -a; source /etc/aribot/b2.env; set +a    # populate first per Phase 5
 b2 account authorize "$B2_APPLICATION_KEY_ID" "$B2_APPLICATION_KEY"
-LATEST=$(b2 ls --recursive "$B2_BUCKET" | awk '{print $NF}' | grep -E '^aribot-backup-.*\.tar\.gz\.gpg$' | sort | tail -1)
+LATEST=$(b2 ls --recursive "b2://$B2_BUCKET" | awk '{print $NF}' | grep -E '^aribot-backup-.*\.tar\.gz\.gpg$' | sort | tail -1)
 sudo systemctl stop aribot-sidecar
 sudo rm -rf /var/lib/aribot/.aribot
 sudo b2 file download "b2://$B2_BUCKET/$LATEST" /tmp/restore.tar.gz.gpg

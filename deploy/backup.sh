@@ -107,8 +107,12 @@ rm -f "$STAGED"
 log "uploaded ${NAME}"
 
 # ─── Prune old backups (keep newest $RETAIN) ─────────────────────────
+# Note on b2 CLI versioning: v4+ requires bucket arguments as b2:// URIs.
+# Passing a bare bucket name silently returns 0 results (the CLI errors
+# to stderr but the awk/grep pipeline still exits 0), so old backups
+# would never be pruned. Always use the b2:// form.
 log "pruning old backups (retain=${RETAIN})"
-mapfile -t ALL < <(b2 ls --recursive "$B2_BUCKET" | awk '{print $NF}' | grep -E '^aribot-backup-.*\.tar\.gz\.gpg$' | sort)
+mapfile -t ALL < <(b2 ls --recursive "b2://${B2_BUCKET}" | awk '{print $NF}' | grep -E '^aribot-backup-.*\.tar\.gz\.gpg$' | sort)
 TOTAL=${#ALL[@]}
 if (( TOTAL > RETAIN )); then
     PRUNE_COUNT=$(( TOTAL - RETAIN ))
