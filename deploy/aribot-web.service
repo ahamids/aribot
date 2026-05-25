@@ -50,7 +50,10 @@ RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# NOT setting MemoryDenyWriteExecute=true here even though the sidecar
+# uses it: V8's JIT compiler needs writeable+executable memory pages,
+# and the kernel SIGTRAPs the process on the first generated instruction
+# if W^X is enforced. Python doesn't JIT so it's safe for aribot-sidecar.
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
