@@ -7,22 +7,43 @@ import {
   ApiError,
   type StatusResponse,
   type CredentialsStatusResponse,
+  type PositionsResponse,
+  type TradesResponse,
+  type EquityResponse,
 } from "@/lib/api/aribot";
 import { ModePicker } from "./mode-picker";
+import { AutoRefresh } from "./auto-refresh";
+import { PositionsCard } from "./positions-card";
+import { TradesCard } from "./trades-card";
+import { EquitySparkline } from "./equity-sparkline";
+
+export const dynamic = "force-dynamic";
 
 interface BackendSnapshot {
   status: StatusResponse | null;
   credentials: CredentialsStatusResponse | null;
+  positions: PositionsResponse | null;
+  trades: TradesResponse | null;
+  equity: EquityResponse | null;
   error: { code: number; message: string } | null;
 }
 
 async function getBackendSnapshot(): Promise<BackendSnapshot> {
   try {
-    const [status, credentials] = await Promise.all([
-      aribotApi.status(),
-      aribotApi.credentialsStatus(),
-    ]);
-    return { status, credentials, error: null };
+    // Fetch in parallel. If credentials.loaded is false (no Bybit keys
+    // pushed yet) the bot can't possibly have positions/trades/equity,
+    // but the backend still returns empty arrays — no special-casing
+    // needed on this end.
+    const [status, credentials, positions, trades, equity] = await Promise.all(
+      [
+        aribotApi.status(),
+        aribotApi.credentialsStatus(),
+        aribotApi.positions().catch(() => null),
+        aribotApi.trades(7).catch(() => null),
+        aribotApi.equity(24).catch(() => null),
+      ],
+    );
+    return { status, credentials, positions, trades, equity, error: null };
   } catch (e) {
     if (e instanceof ApiError) {
       // Surface FastAPI's HTTPException(detail=...) so JWT failures are
@@ -38,6 +59,9 @@ async function getBackendSnapshot(): Promise<BackendSnapshot> {
       return {
         status: null,
         credentials: null,
+        positions: null,
+        trades: null,
+        equity: null,
         error: {
           code: e.status,
           message: detail ? `${e.message} — ${detail}` : e.message,
@@ -47,6 +71,9 @@ async function getBackendSnapshot(): Promise<BackendSnapshot> {
     return {
       status: null,
       credentials: null,
+      positions: null,
+      trades: null,
+      equity: null,
       error: { code: 0, message: String(e) },
     };
   }
@@ -86,8 +113,10 @@ export default async function DashboardPage() {
 
           {snap.status && (
             <>
-              <StatusCard status={snap.status} />
+              <StatusCard status={snap.status} equity={snap.equity} />
               <ModePicker currentMode={snap.status.mode} />
+              <PositionsCard positions={snap.positions} />
+              <TradesCard trades={snap.trades} />
               <CredentialsCard credentials={snap.credentials} />
               <ControlsCard
                 status={snap.status}
@@ -97,6 +126,10 @@ export default async function DashboardPage() {
           )}
         </div>
       </section>
+
+      {/* Re-fetches the Server Component every 15s. Visible-tab only;
+          pauses when the tab is hidden. */}
+      <AutoRefresh intervalMs={15000} />
     </main>
   );
 }
@@ -133,7 +166,13 @@ function ConnectionCard({ snap }: { snap: BackendSnapshot }) {
   );
 }
 
-function StatusCard({ status }: { status: StatusResponse }) {
+function StatusCard({
+  status,
+  equity,
+}: {
+  status: StatusResponse;
+  equity: EquityResponse | null;
+}) {
   const pill = {
     running: { label: "Running", bg: "bg-mint" },
     starting: { label: "Starting", bg: "bg-yellow" },
@@ -191,6 +230,17 @@ function StatusCard({ status }: { status: StatusResponse }) {
           }
         />
       </div>
+
+      {equity && equity.points.length > 1 && (
+        <div className="mt-4">
+          <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
+            Equity · last {equity.rangeHours}h
+          </div>
+          <div className="mt-2">
+            <EquitySparkline points={equity.points} />
+          </div>
+        </div>
+      )}
 
       {status.reason && (
         <p className="mt-3 text-sm text-plum-mid">{status.reason}</p>

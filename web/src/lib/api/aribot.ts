@@ -52,6 +52,69 @@ export interface CredentialsStatusResponse {
   validatedAtIso?: string;
 }
 
+export type PositionSide = "LONG" | "SHORT";
+
+export interface Position {
+  symbol: string;
+  side: PositionSide;
+  size: number;
+  entry: number;
+  mark?: number;
+  pnl: number;
+  pnlPercent?: number;
+  leverage?: number;
+  liquidationPrice?: number;
+  openedAtIso?: string;
+}
+
+export interface PositionsResponse {
+  positions: Position[];
+  asOfIso: string;
+}
+
+export interface Trade {
+  symbol: string;
+  side: PositionSide;
+  pnl: number;
+  pnlPercent?: number;
+  entryPrice?: number;
+  exitPrice?: number;
+  quantity?: number;
+  reason?: string;
+  openedAtIso?: string;
+  closedAtIso: string;
+}
+
+export interface TradesResponse {
+  trades: Trade[];
+  asOfIso: string;
+  note: string;
+}
+
+export interface EquityPoint {
+  t: string;
+  equity: number;
+}
+
+export interface EquityStats {
+  winRate?: number;
+  tradeCount: number;
+  avgWin?: number;
+  avgLoss?: number;
+  bestWin?: number;
+  worstLoss?: number;
+  pnlAbs: number;
+  pnlPercent?: number;
+}
+
+export interface EquityResponse {
+  points: EquityPoint[];
+  todaysPnl: number;
+  rangeHours: number;
+  stats: EquityStats;
+  note: string;
+}
+
 export interface PubkeyResponse {
   publicKey: string;
   fingerprint: string;
@@ -140,9 +203,9 @@ async function request<T>(
 
 export const aribotApi = {
   status: () => request<StatusResponse>("/status"),
-  positions: () => request("/positions"),
-  trades: (days = 7) => request(`/trades?days=${days}`),
-  equity: (days = 1) => request(`/equity?days=${days}`),
+  positions: () => request<PositionsResponse>("/positions"),
+  trades: (days = 7) => request<TradesResponse>(`/trades?days=${days}`),
+  equity: (days = 1) => request<EquityResponse>(`/equity?days=${days}`),
   setMode: (mode: BotMode) =>
     request<ModeResponse>("/mode", {
       method: "POST",
