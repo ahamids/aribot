@@ -1,0 +1,21 @@
+# Aribot bot runtime dependencies (usdt_paper_bot_v2.py + helpers).
+# Kept minimal — the sidecar's own deps live in
+# requirements-status-server.txt. install.sh in deploy/ installs both
+# into /opt/aribot/.venv on a fresh box.
+#
+# Pinning policy: floor-only (>=). The bot exercises a small surface of
+# each library (Bybit perp endpoints via CCXT, env loading, HTTP posts),
+# so major-version bumps need a manual smoke-test before pinning higher.
+
+# Exchange API. Aribot uses ccxt.bybit() for both REST and websocket-
+# adjacent polling. Pinned to 4.x — 5.x has breaking changes in the
+# unified symbol format.
+ccxt>=4.4,<5
+
+# Loads BYBIT_*/BOT_MODE/etc. from /etc/aribot/aribot.env at bot start.
+python-dotenv>=1.0
+
+# Used by alert_dispatcher.py for outbound Telegram + future webhook
+# notifications. Standard-lib urllib would suffice but requests is the
+# established idiom in the rest of the codebase.
+requests>=2.31
