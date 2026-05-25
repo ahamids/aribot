@@ -218,10 +218,24 @@ def _parse_iso(s: str) -> Optional[datetime.datetime]:
 
 
 def _pid_alive(pid: int) -> bool:
+    """True iff the process is alive AND making progress.
+
+    A zombie/defunct process (status='Z') still has an entry in /proc
+    and `psutil.pid_exists(pid)` returns True for it — but the process
+    has actually exited and is just waiting for its parent to reap it
+    via waitpid(). For Aribot's purposes a zombie is dead: the bot is
+    no longer running any loop. Treating it as alive made GET /status
+    stick on 'stopping' indefinitely after a graceful stop, because
+    the sidecar's start_bot uses subprocess.Popen with
+    start_new_session=True and never calls .wait() on the child.
+    """
     if pid <= 0:
         return False
     try:
-        return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
+        proc = psutil.Process(pid)
+        if not proc.is_running():
+            return False
+        return proc.status() != psutil.STATUS_ZOMBIE
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
 
