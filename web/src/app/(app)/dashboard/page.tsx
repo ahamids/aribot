@@ -107,7 +107,10 @@ export default async function DashboardPage() {
               <ModePicker currentMode={snap.status.mode} />
               <PositionsCard positions={snap.positions} />
               <TradesCard trades={snap.trades} />
-              <CredentialsCard credentials={snap.credentials} />
+              <CredentialsCard
+                credentials={snap.credentials}
+                mode={snap.status.mode}
+              />
             </>
           )}
         </div>
@@ -189,6 +192,7 @@ function StatusCard({
                 <span className="ml-1 text-plum-soft">(testnet)</span>
               )}
             </span>
+            <RegimePill regime={status.btcRegime} />
           </div>
         </div>
         <div className="text-right">
@@ -237,6 +241,39 @@ function StatusCard({
   );
 }
 
+/**
+ * BTC regime gate pill: shown next to mode when the bot is running and
+ * has computed a recent regime. The bot only takes entries in the
+ * direction of the regime (BUY = longs only, SELL = shorts only), so
+ * the operator wants this visible at a glance. Returns null for null
+ * (bot not running) or UNKNOWN (no cycle has computed it yet).
+ */
+function RegimePill({ regime }: { regime?: string | null }) {
+  if (!regime || regime === "UNKNOWN") return null;
+  const config: Record<string, { label: string; bg: string; fg: string }> = {
+    BUY: { label: "↑ BUY-only", bg: "bg-pnl-green-soft", fg: "text-pnl-green" },
+    SELL: { label: "↓ SELL-only", bg: "bg-pnl-red-soft", fg: "text-pnl-red" },
+    UNAVAILABLE: {
+      label: "regime offline",
+      bg: "bg-cream-deep",
+      fg: "text-plum-mid",
+    },
+  };
+  const c = config[regime] ?? {
+    label: regime.toLowerCase(),
+    bg: "bg-cream-deep",
+    fg: "text-plum-mid",
+  };
+  return (
+    <span
+      className={`outline-plum rounded-[6px] px-1.5 py-0.5 text-xs font-bold ${c.bg} ${c.fg}`}
+      title="Latest BTC regime gate; only entries in this direction are taken."
+    >
+      {c.label}
+    </span>
+  );
+}
+
 function Stat({
   label,
   value,
@@ -266,14 +303,24 @@ function Stat({
 
 function CredentialsCard({
   credentials,
+  mode,
 }: {
   credentials: CredentialsStatusResponse | null;
+  mode: StatusResponse["mode"];
 }) {
   if (!credentials) return null;
+  // PAPER mode trades are simulated — no real Bybit calls — so the
+  // vault is genuinely optional. Soften the messaging so a PAPER-mode
+  // user doesn't feel funnelled toward a flow they don't need.
+  const isOptional = mode === "PAPER" && !credentials.loaded;
   return (
     <div
       className={`outline-plum rounded-[18px] p-5 ${
-        credentials.loaded ? "bg-paper" : "bg-cream-deep"
+        credentials.loaded
+          ? "bg-paper"
+          : isOptional
+            ? "bg-paper"
+            : "bg-cream-deep"
       }`}
     >
       <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -282,7 +329,11 @@ function CredentialsCard({
             Bybit API keys
           </div>
           <div className="mt-1 text-lg font-black text-plum">
-            {credentials.loaded ? "Loaded in memory" : "Not configured"}
+            {credentials.loaded
+              ? "Loaded in memory"
+              : isOptional
+                ? "Optional for PAPER mode"
+                : "Not configured"}
           </div>
           {credentials.fingerprint && (
             <div className="mt-1 text-xs font-mono text-plum-mid">
@@ -291,15 +342,29 @@ function CredentialsCard({
           )}
           {!credentials.loaded && (
             <p className="mt-2 text-sm text-plum-mid max-w-md">
-              Your keys are encrypted in your browser before they ever
-              leave the device. Set a passphrase, save a recovery code,
-              push the ciphertext to the bot.
+              {isOptional ? (
+                <>
+                  PAPER mode simulates trades locally, no real orders are
+                  placed. Set up the vault when you&apos;re ready to flip
+                  to SHADOW (real prices, paper PnL) or LIVE.
+                </>
+              ) : (
+                <>
+                  Your keys are encrypted in your browser before they ever
+                  leave the device. Set a passphrase, save a recovery code,
+                  push the ciphertext to the bot.
+                </>
+              )}
             </p>
           )}
         </div>
         <Link
           href="/vault"
-          className="sticker outline-plum-thick rounded-[14px] bg-coral text-plum px-5 py-2.5 font-black inline-flex items-center justify-center transition hover:translate-y-[-2px]"
+          className={
+            isOptional
+              ? "outline-plum rounded-[14px] bg-paper text-plum px-5 py-2.5 font-bold inline-flex items-center justify-center hover:bg-cream-deep"
+              : "sticker outline-plum-thick rounded-[14px] bg-coral text-plum px-5 py-2.5 font-black inline-flex items-center justify-center transition hover:translate-y-[-2px]"
+          }
         >
           {credentials.loaded ? "Manage vault" : "Set up vault"}
         </Link>

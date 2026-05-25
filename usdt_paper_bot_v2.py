@@ -1958,6 +1958,12 @@ class Aribot:
             'session_start_balance': float(self.session_start_balance),
             'daily_drawdown_paused': bool(self.daily_drawdown_paused),
             'manual_entry_paused': bool(self.manual_entry_paused),
+            # Latest BTC regime gate: 'BUY' (longs only), 'SELL' (shorts
+            # only), 'UNAVAILABLE' (regime fetch failed this cycle), or
+            # 'UNKNOWN' (no cycle has computed it yet). Surfaced on the
+            # web dashboard so the operator can see why entries are
+            # gated one direction or the other.
+            'btc_regime': str(self.last_regime_signal or 'UNKNOWN'),
         }
         try:
             target = Path(self.status_snapshot_file)

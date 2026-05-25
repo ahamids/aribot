@@ -38,6 +38,13 @@ export interface StatusResponse {
   cycleCount: number;
   runId: string;
   reason?: string;
+  // Latest BTC regime gate while the bot is running:
+  //   'BUY'         -> longs only this window
+  //   'SELL'        -> shorts only this window
+  //   'UNAVAILABLE' -> regime fetch failed this cycle
+  //   'UNKNOWN'     -> no cycle has computed it yet
+  //   null/undefined -> bot not running (snap not authoritative)
+  btcRegime?: string | null;
 }
 
 export interface ModeResponse {

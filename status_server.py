@@ -328,6 +328,10 @@ class StatusOut(BaseModel):
     cycleCount: int = 0
     runId: str = ""
     reason: Optional[str] = None
+    # Latest BTC regime gate from the running bot. 'BUY' = longs only,
+    # 'SELL' = shorts only, 'UNAVAILABLE' / 'UNKNOWN' = no recent
+    # computation. None when no snapshot exists (bot has never run).
+    btcRegime: Optional[str] = None
 
 
 class PositionOut(BaseModel):
@@ -1589,6 +1593,15 @@ def build_app(
             mode = persisted_mode
             testnet = persisted_testnet
 
+        # btcRegime is only meaningful while the bot is actually running
+        # (snap.btc_regime is updated each cycle). When stopped, the last
+        # snapshot's value is historical — surface None instead of a
+        # stale 'BUY'/'SELL' that would suggest the gate is live.
+        btc_regime_raw = snap.get("btc_regime") if snap_authoritative else None
+        btc_regime: Optional[str] = (
+            str(btc_regime_raw).upper() if btc_regime_raw else None
+        )
+
         return StatusOut(
             version=VERSION,
             mode=mode,
@@ -1602,6 +1615,7 @@ def build_app(
             cycleCount=int(snap.get("cycle_count", 0)),
             runId=str(snap.get("run_id", "")),
             reason=reason,
+            btcRegime=btc_regime,
         )
 
     @app.get("/positions", response_model=PositionsOut)

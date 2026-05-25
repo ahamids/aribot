@@ -32,12 +32,17 @@ export function ControlsPanel({
   const stopping = status.status === "stopping";
   const running = status.status === "running" || status.status === "starting";
 
-  // Start is only sensible when stopped/stale/crashed AND credentials are
-  // loaded AND no kill switch AND no graceful stop in progress. Backend
-  // gates this too — we just disable the button so it's not visually
-  // misleading.
-  const canStart =
-    credentialsLoaded && !killSwitchActive && !running && !stopping;
+  // Backend rules (status_server.py start_bot):
+  //   - PAPER mode never needs Bybit keys — trades are simulated.
+  //   - SHADOW + LIVE need keys loaded in the sidecar (LIVE explicitly
+  //     refuses with 412; SHADOW reads keys to fetch real exchange
+  //     prices). The UI mirrors that: PAPER can start without the
+  //     vault, the other modes can't.
+  //
+  // Also blocked by kill switch + in-flight start/stop.
+  const credsRequired = status.mode !== "PAPER";
+  const credsReady = !credsRequired || credentialsLoaded;
+  const canStart = credsReady && !killSwitchActive && !running && !stopping;
   // Stop is a no-op while already stopping; greying it out avoids
   // misleading the user into thinking a second click escalates the stop.
   // Kill stays available because it IS the escalation path.
@@ -88,13 +93,13 @@ export function ControlsPanel({
             onClick={onStartClick}
             disabled={!canStart || pending}
             title={
-              !credentialsLoaded
-                ? "Add Bybit keys first"
+              credsRequired && !credentialsLoaded
+                ? `Add Bybit keys first (${status.mode} mode needs them)`
                 : stopping
                   ? "Waiting for the bot to finish exiting…"
                   : running
                     ? "Bot already running"
-                    : "Start the bot"
+                    : `Start the bot in ${status.mode} mode`
             }
             className="sticker outline-plum-thick rounded-[12px] bg-mint text-plum px-5 py-2.5 font-black disabled:opacity-50 disabled:translate-y-0 transition hover:translate-y-[-2px]"
           >
