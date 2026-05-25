@@ -1,8 +1,10 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { aribotApi, ApiError } from "@/lib/api/aribot";
+import { readTheme } from "@/lib/theme";
 import { AppNav } from "../nav";
 import { SettingsClient } from "./settings-client";
+import { ThemeToggle } from "./theme-toggle";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +12,8 @@ export default async function SettingsPage() {
   const supabase = await createClient();
   const { data } = await supabase.auth.getUser();
   if (!data.user) redirect("/sign-in");
+
+  const theme = await readTheme();
 
   // We only need a few server-resolved facts here — the actual toggle
   // state and danger-zone actions live client-side so we can show
@@ -61,6 +65,18 @@ export default async function SettingsPage() {
             initialMode={initialMode}
             botRunning={botRunning}
           />
+
+          <div className="outline-plum rounded-[18px] bg-paper p-5">
+            <h2 className="text-xl font-black text-plum">Appearance</h2>
+            <p className="mt-2 text-sm text-plum-mid">
+              Theme preference, stored in a cookie so it&apos;s applied
+              server-side on the next paint (no flash of unstyled
+              content).
+            </p>
+            <div className="mt-4">
+              <ThemeToggle initialTheme={theme} />
+            </div>
+          </div>
         </div>
       </section>
     </main>
