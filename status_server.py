@@ -402,6 +402,19 @@ class ModeBody(BaseModel):
     mode: Mode
 
 
+class TestnetBody(BaseModel):
+    testnet: bool
+
+
+class TestnetOut(BaseModel):
+    ok: bool
+    testnet: Optional[bool] = None
+    detail: str
+    # Mirrors ModeOut.runningPid: if a tenant's bot is running, we refuse
+    # the testnet flip and report its pid so the UI can prompt for a stop.
+    runningPid: Optional[int] = None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Credential vault wire models (paired with app/src/lib/botApi.ts)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -990,6 +1003,101 @@ def set_bot_mode(
     return True, f"BOT_MODE set to {norm}; bot will use it on next start", None, norm.upper()
 
 
+def set_bybit_testnet(
+    cfg: Config,
+    user: AuthUser,
+    requested_testnet: bool,
+    *,
+    registry: Optional[TenantRegistry] = None,
+    meta_db: Optional[MetaDb] = None,
+) -> tuple[bool, str, Optional[int], Optional[bool]]:
+    """Update BYBIT_TESTNET for the given user.
+
+    Returns (ok, detail, running_pid, effective_testnet).
+
+    Same shape as set_bot_mode: tenant write goes to config.json via
+    registry.set_testnet(user.id, ...); legacy write rewrites the .env
+    file. Refuses if the bot is currently running because the bot reads
+    BYBIT_TESTNET once at startup (Bybit ccxt client is constructed
+    against the resolved env).
+    """
+    requested = bool(requested_testnet)
+
+    if user.is_legacy:
+        running = _running_bot_pid_legacy(cfg)
+        if running is not None:
+            return (
+                False,
+                f"bot is currently running (pid {running}); stop it first via POST /stop",
+                running,
+                None,
+            )
+
+        env_path = cfg.env_file_path
+        try:
+            existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        except OSError as exc:
+            return False, f"could not read {env_path}: {exc}", None, None
+
+        new_text = _rewrite_env_key(
+            existing_text, "BYBIT_TESTNET", "true" if requested else "false"
+        )
+
+        try:
+            tmp = env_path.with_suffix(env_path.suffix + ".tmp")
+            tmp.write_text(new_text, encoding="utf-8")
+            os.replace(tmp, env_path)
+        except OSError as exc:
+            return False, f"could not write {env_path}: {exc}", None, None
+
+        return (
+            True,
+            f"BYBIT_TESTNET set to {requested}; bot will use it on next start",
+            None,
+            requested,
+        )
+
+    # Tenant mode.
+    if registry is None:
+        return False, "tenant set_bybit_testnet requires registry", None, None
+    try:
+        ctx = _resolve_tenant(registry, user.id)
+    except InvalidTenantId as exc:
+        return False, f"invalid user_id: {exc}", None, None
+
+    running = _running_bot_pid_tenant(ctx)
+    if running is not None:
+        return (
+            False,
+            f"bot is currently running (pid {running}); stop it first via POST /stop",
+            running,
+            None,
+        )
+
+    try:
+        registry.set_testnet(user.id, requested)
+    except (ValueError, OSError) as exc:
+        return False, f"could not set testnet: {exc}", None, None
+
+    if meta_db is not None:
+        try:
+            meta_db.record_audit(
+                user.id, "testnet_change", {"testnet": requested}
+            )
+        except Exception as exc:
+            print(
+                f"[status_server] meta_db record_audit(testnet_change) failed: {exc}",
+                file=sys.stderr,
+            )
+
+    return (
+        True,
+        f"BYBIT_TESTNET set to {requested}; bot will use it on next start",
+        None,
+        requested,
+    )
+
+
 def _rewrite_env_key(text: str, key: str, value: str) -> str:
     """Replace `KEY=...` line in dotenv text (preserving everything else), or
     append a new line if the key wasn't present. Quoting strategy: if the new
@@ -1398,8 +1506,13 @@ def build_app(
                     persisted_mode = "PAPER"
             except Exception:
                 persisted_mode = "PAPER"
+            try:
+                persisted_testnet: bool = bool(registry.get_testnet(user.id))
+            except Exception:
+                persisted_testnet = True
         else:
             persisted_mode = "PAPER"
+            persisted_testnet = True
 
         if snap is None:
             return StatusOut(
@@ -1407,26 +1520,27 @@ def build_app(
                 mode=persisted_mode,
                 status=st,
                 lastCycleIso=now_utc.isoformat(),
+                testnet=persisted_testnet,
                 reason=reason,
             )
 
         started = _parse_iso(str(snap.get("started_at", "")))
         uptime = int((now_utc - started).total_seconds()) if started else 0
-        # The snapshot's `mode` only reflects what the currently-running
-        # bot believes — it's a captured state, not a live one. If the
-        # bot is no longer running (stopped, killed, errored, stale), the
-        # snapshot's mode is historical and a subsequent POST /mode that
-        # updated config.json should win. Trust snap.mode only for
-        # "running" / "stopping" states where the bot's view is the
-        # current truth.
-        snap_mode_authoritative = st in ("running", "stopping")
-        if snap_mode_authoritative:
+        # The snapshot's `mode` + `testnet` only reflect what the currently-
+        # running bot believes — captured state, not live. When the bot is
+        # no longer running, the snapshot is historical and a subsequent
+        # POST /mode or POST /testnet that updated config.json should win.
+        # Trust snap only for "running" / "stopping" states.
+        snap_authoritative = st in ("running", "stopping")
+        if snap_authoritative:
             mode_raw = str(snap.get("mode", persisted_mode)).upper()
             mode: Mode = (
                 mode_raw if mode_raw in ("PAPER", "SHADOW", "LIVE") else persisted_mode
             )
+            testnet = bool(snap.get("testnet", persisted_testnet))
         else:
             mode = persisted_mode
+            testnet = persisted_testnet
 
         return StatusOut(
             version=VERSION,
@@ -1437,7 +1551,7 @@ def build_app(
             openPositions=int(snap.get("open_positions", 0)),
             currentBalance=float(snap.get("current_balance", 0.0)),
             todaysPnl=_compute_todays_pnl(db_path, lev),
-            testnet=bool(snap.get("testnet", False)),
+            testnet=testnet,
             cycleCount=int(snap.get("cycle_count", 0)),
             runId=str(snap.get("run_id", "")),
             reason=reason,
@@ -1545,6 +1659,23 @@ def build_app(
             cfg, user, body.mode, registry=registry, meta_db=meta_db
         )
         out = ModeOut(ok=ok, mode=effective, detail=detail, runningPid=running_pid).model_dump()
+        if not ok and running_pid is not None:
+            return JSONResponse(out, status_code=http_status.HTTP_409_CONFLICT)
+        if not ok:
+            return JSONResponse(out, status_code=http_status.HTTP_400_BAD_REQUEST)
+        return JSONResponse(out, status_code=http_status.HTTP_200_OK)
+
+    @app.post("/testnet", response_model=TestnetOut)
+    def post_testnet(
+        body: TestnetBody,
+        user: AuthUser = Depends(require_user),
+    ) -> JSONResponse:
+        ok, detail, running_pid, effective = set_bybit_testnet(
+            cfg, user, body.testnet, registry=registry, meta_db=meta_db
+        )
+        out = TestnetOut(
+            ok=ok, testnet=effective, detail=detail, runningPid=running_pid
+        ).model_dump()
         if not ok and running_pid is not None:
             return JSONResponse(out, status_code=http_status.HTTP_409_CONFLICT)
         if not ok:
