@@ -621,14 +621,42 @@ def start_bot(
         if existing is not None:
             return False, f"bot already running (pid {existing})", existing
 
-        # If a kill switch is still on disk, refuse to start — the operator
-        # set it intentionally, the bot would just exit again immediately.
+        # Kill switch handling at /start time:
+        #   * intent=kill (emergency)     -> refuse. The flag was set
+        #                                    intentionally; require explicit
+        #                                    DELETE /kill before restart.
+        #   * intent=stop (graceful exit) -> auto-clear and proceed. The
+        #                                    flag is just a leftover from
+        #                                    the last clean shutdown; a
+        #                                    subsequent /start IS the
+        #                                    user's intent to resume. This
+        #                                    matches the UI: status reads
+        #                                    "stopped" in this case (per
+        #                                    _derive_status_for), so the
+        #                                    Start button is shown and
+        #                                    the user shouldn't see a
+        #                                    "kill switch present" error
+        #                                    they have no UI affordance
+        #                                    to address.
+        #   * unknown / unreadable        -> treat as emergency, refuse.
         if kill_path.exists():
-            return (
-                False,
-                f"kill switch present at {kill_path} — remove before starting",
-                None,
-            )
+            intent = _read_kill_intent(kill_path)
+            if intent == "stop":
+                try:
+                    kill_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    return (
+                        False,
+                        f"could not clear stale stop flag at {kill_path}: {exc}",
+                        None,
+                    )
+            else:
+                return (
+                    False,
+                    f"kill switch present at {kill_path} — clear via "
+                    f"DELETE /kill before starting",
+                    None,
+                )
 
         # LIVE-mode credential guard. LIVE refuses to start without iOS-pushed
         # credentials FOR THIS user. PAPER/SHADOW stay permissive.
