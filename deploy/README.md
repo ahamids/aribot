@@ -471,7 +471,56 @@ sudo rm -rf /tmp/restore-test
 
 ---
 
-## Pre-launch gate (flip iOS app to prod URL)
+## Phase 6 — Web frontend (aribot.app)
+
+**Goal:** Next.js 16 web app at `https://aribot.app` (and `https://www.aribot.app` → redirect to apex). Same Hetzner box, separate systemd service alongside `aribot-sidecar`. Caddy handles both apex + api on shared TLS infrastructure.
+
+**Time:** ~20 min (mostly the `npm ci` + `next build`)
+
+**Prerequisite:** Phase 1-4 done. The sidecar at `api.aribot.app` should be live before bringing up the web app — Server Actions proxy to it.
+
+```bash
+# bash (server)
+
+# 1. Hand-write the web env file. NEXT_PUBLIC_SUPABASE_URL must match
+# SUPABASE_URL in /etc/aribot/aribot.env or the JWT the web app mints
+# won't be accepted by the sidecar.
+sudo install -m 640 -o root -g aribot \
+    /opt/aribot/deploy/web.env.example \
+    /etc/aribot/web.env
+sudo nano /etc/aribot/web.env
+
+# 2. Run the bootstrap script. Installs Node 22, adds 1GB swap, builds
+# the standalone Next.js bundle, installs the systemd unit, starts it.
+sudo bash /opt/aribot/deploy/install-web.sh
+
+# 3. Reload Caddy so it picks up the new aribot.app block from the
+# updated /etc/caddy/Caddyfile (committed in /opt/aribot/deploy/Caddyfile).
+sudo cp /opt/aribot/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+In Cloudflare → DNS → Records → Add records:
+- `A aribot.app` → `{SERVER_IPV4}` — **Proxied (orange cloud)**, TTL Auto
+- `CNAME www.aribot.app` → `aribot.app` — **Proxied (orange cloud)**, TTL Auto
+
+(Both can be orange-cloud from the start — Caddy already has a valid LE account from Phase 3, and the cert acquisition for new hostnames flows through the same account without needing grey-cloud.)
+
+**Validate:**
+- `sudo systemctl is-active aribot-web` returns `active`.
+- `curl -fsS http://127.0.0.1:3000/` returns the landing HTML.
+- `curl -fsS https://aribot.app/` returns 200 from your local machine.
+- `curl -I https://aribot.app/` shows `Strict-Transport-Security` + `cf-ray`.
+- `curl -I https://www.aribot.app/` shows `Location: https://aribot.app/` + 301.
+- Visit `https://aribot.app` in a browser, sign in, verify the dashboard loads with backend data (proves Supabase JWT validation works across the prod domain).
+
+**Rollback:** `sudo systemctl disable --now aribot-web && sudo rm /etc/systemd/system/aribot-web.service`. Revert the Caddyfile to the previous version (without the aribot.app block) and reload. Domain returns to "site not configured" on the LE check.
+
+> 🛑 **PAUSE for review.**
+
+---
+
+## Pre-launch gate (open to public users)
 
 Before changing the iOS app's `ARIBOT_BASE_URL` to `https://api.{YOUR_DOMAIN}`:
 
@@ -483,7 +532,9 @@ Before changing the iOS app's `ARIBOT_BASE_URL` to `https://api.{YOUR_DOMAIN}`:
 - [ ] `journalctl -u aribot-sidecar --since '24 hours ago' | grep -iE 'error|traceback|critical'` returns nothing alarming.
 - [ ] `/etc/aribot/aribot.env` is mode 640, owned `root:aribot` (group-readable so the aribot service user can source it). `/etc/aribot/b2.env` and `/etc/aribot/backup-passphrase` stay mode 600, owned `root:root` (only root via cron needs them).
 - [ ] `sudo ufw status` confirms only 22, 80, 443 are open.
-- [ ] `sudo ss -tlnp | grep -v 127.0.0.1` confirms ONLY caddy and ssh listen on public interfaces; sidecar is loopback only.
+- [ ] `sudo ss -tlnp | grep -v 127.0.0.1` confirms ONLY caddy and ssh listen on public interfaces; sidecar (`:8787`) and web (`:3000`) are loopback only.
+- [ ] `https://aribot.app/` returns the landing in a fresh incognito window. Sign-up → email confirm → sign-in → dashboard works end-to-end on the prod domain.
+- [ ] `aribot-web` survives a reboot (`sudo systemctl reboot`, wait 60s, `curl https://aribot.app/` returns 200).
 - [ ] Supabase prod project's `auth.users` table has only the operator's account.
 - [ ] B2 bucket contains 1+ encrypted backup; download + decrypt drill verified.
 - [ ] Hetzner snapshot of the server taken (one-click; ~$0.011/GB/mo) — manual rollback insurance for the first week.
@@ -494,7 +545,7 @@ Before changing the iOS app's `ARIBOT_BASE_URL` to `https://api.{YOUR_DOMAIN}`:
 
 ## Day-2 operations
 
-### Deploy a new version
+### Deploy a new backend version
 ```bash
 # bash (server)
 cd /opt/aribot
@@ -505,11 +556,28 @@ sudo systemctl restart aribot-sidecar
 sudo journalctl -u aribot-sidecar -f
 ```
 
+### Deploy a new web version
+```bash
+# bash (server)
+cd /opt/aribot
+sudo -u aribot git fetch
+sudo -u aribot git checkout {NEW_REF}
+# Rebuild + restart in one shot via the install-web.sh script.
+# It's idempotent: npm ci, next build (~3 min), copy static+public,
+# restart aribot-web.service. ~4 min of downtime on the web app
+# during the build (sidecar at api.aribot.app is unaffected).
+sudo bash /opt/aribot/deploy/install-web.sh
+```
+
 ### Tail logs
 ```bash
 # Sidecar
 sudo journalctl -u aribot-sidecar -f
 sudo tail -f /var/log/aribot/sidecar.log
+
+# Web frontend
+sudo journalctl -u aribot-web -f
+sudo tail -f /var/log/aribot/web.log
 
 # A specific tenant's bot
 sudo tail -f /var/lib/aribot/.aribot/tenants/<UUID>/bot.log
@@ -653,11 +721,14 @@ These do not block production launch:
 
 | File | Purpose |
 |---|---|
-| `deploy/install.sh` | Idempotent Ubuntu 24.04 bootstrap |
-| `deploy/Caddyfile` | Reverse proxy + Let's Encrypt config |
+| `deploy/install.sh` | Idempotent Ubuntu 24.04 bootstrap (sidecar) |
+| `deploy/install-web.sh` | Node 22 + swap + npm ci + next build + systemd unit (web frontend) |
+| `deploy/Caddyfile` | Reverse proxy: api.aribot.app + aribot.app + www redirect |
 | `deploy/caddy-systemd-override.conf` | systemd drop-in that loads /etc/default/caddy (the apt unit doesn't by default) |
-| `deploy/aribot-sidecar.service` | systemd unit for the multi-tenant sidecar (current) |
+| `deploy/aribot-sidecar.service` | systemd unit for the multi-tenant sidecar (FastAPI on :8787) |
+| `deploy/aribot-web.service` | systemd unit for the Next.js frontend (on :3000) |
 | `deploy/aribot.service` | **Deprecated** — legacy single-tenant systemd unit (pre-migration) |
 | `deploy/backup.sh` | Streamed encrypted backup → B2 |
-| `deploy/.env.production.example` | Production env template |
+| `deploy/.env.production.example` | Sidecar env template |
+| `deploy/web.env.example` | Web env template (NEXT_PUBLIC_* baked at build time) |
 | `deploy/register_telegram_commands.py` | Telegram bot setMyCommands utility (operational, not deploy-critical) |

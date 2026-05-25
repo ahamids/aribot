@@ -1,10 +1,15 @@
 # =====================================================================
 # Aribot production reverse proxy
 #
-# Substitute via environment variables loaded from /etc/default/caddy:
+# Three site blocks:
 #
-#   SITE_ADDRESS  api.your-domain.tld   (the FQDN that resolves to this server)
-#   EMAIL         you@your-domain.tld   (Let's Encrypt registration; expiry warnings)
+#   {$SITE_ADDRESS}   -> 127.0.0.1:8787  (the FastAPI sidecar)
+#   aribot.app        -> 127.0.0.1:3000  (the Next.js web frontend)
+#   www.aribot.app    -> 301 redirect to https://aribot.app
+#
+# {$SITE_ADDRESS} + {$EMAIL} come from /etc/default/caddy. The web
+# blocks are hardcoded to aribot.app because there's no reason to
+# parameterize the canonical product domain.
 #
 # After editing /etc/default/caddy:  systemctl reload caddy
 #
@@ -77,4 +82,50 @@
         # Drop healthz noise from access logs. Comment out if you want it.
         level INFO
     }
+}
+
+# ---------------------------------------------------------------------
+# Web frontend (Next.js standalone server on 127.0.0.1:3000)
+# ---------------------------------------------------------------------
+aribot.app {
+    encode gzip zstd
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        Permissions-Policy        "geolocation=(), microphone=(), camera=()"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:3000 {
+        header_up Host              {host}
+        header_up X-Real-IP         {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Next.js Server Actions can do longer-running work (the vault
+        # push action does PBKDF2 derivation + libsodium + a backend
+        # round-trip). 30s is a safe ceiling.
+        transport http {
+            read_timeout  30s
+            write_timeout 30s
+            dial_timeout   5s
+        }
+    }
+
+    log {
+        output file /var/log/caddy/aribot-app.access.log {
+            roll_size      50mb
+            roll_keep      7
+            roll_keep_for  720h
+        }
+        format json
+        level INFO
+    }
+}
+
+# Redirect www -> apex so the canonical URL is unambiguous.
+www.aribot.app {
+    redir https://aribot.app{uri} permanent
 }
