@@ -1,7 +1,19 @@
 import Link from "next/link";
 import { SignInForm } from "./form";
 
-export default function SignInPage() {
+export default async function SignInPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error } = await searchParams;
+  const errorMessage =
+    error === "invalid_link"
+      ? "That confirmation link is missing required parameters. Try requesting a new one by signing up again."
+      : error
+        ? `Confirmation failed: ${error}`
+        : null;
+
   return (
     <main className="flex-1 flex flex-col">
       <header className="px-6 py-6 sm:px-12">
@@ -18,6 +30,12 @@ export default function SignInPage() {
           <p className="mt-3 text-plum-mid">
             Sign in to manage your bot, vault, and positions.
           </p>
+
+          {errorMessage && (
+            <div className="mt-6 outline-plum rounded-[12px] bg-pnl-red-soft text-plum px-4 py-3 text-sm">
+              {errorMessage}
+            </div>
+          )}
 
           <div className="mt-8">
             <SignInForm />
