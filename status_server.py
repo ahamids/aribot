@@ -59,7 +59,7 @@ from auth_supabase import (
 )
 from bot_keypair import HostIdentity, get_or_create_identity
 from credential_pipe import CredentialServer
-from credential_store import CredentialStore
+from credential_store import CredentialStore, load_or_create_master_key
 from meta_db import MetaDb
 from tenant_registry import (
     BotProcessHandle,
@@ -1968,7 +1968,20 @@ def main() -> None:
     # operator can pin them in the iOS app on first connect.
     cfg.artifact_dir.mkdir(parents=True, exist_ok=True)
     host_identity = get_or_create_identity(cfg.artifact_dir)
-    credential_store = CredentialStore(host=host_identity, state_dir=cfg.artifact_dir)
+
+    # Master key for at-rest credential encryption. Generated on first boot,
+    # reused on every subsequent boot. MUST be included in the same backup
+    # set as credentials_at_rest/*.enc — losing one without the other makes
+    # restored credentials unrecoverable. See credential_store.py docstring.
+    master_key = load_or_create_master_key(cfg.artifact_dir)
+    credential_store = CredentialStore(
+        host=host_identity, state_dir=cfg.artifact_dir, master_key=master_key
+    )
+    restored = credential_store.load_all_from_disk()
+    print(
+        f"[status_server] credentials at-rest: restored {restored} record(s)",
+        file=sys.stderr,
+    )
 
     tls_artifacts: Optional[TlsArtifacts] = None
     if not args.no_tls:

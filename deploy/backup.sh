@@ -78,6 +78,15 @@ b2 account authorize "$B2_APPLICATION_KEY_ID" "$B2_APPLICATION_KEY" >/dev/null \
 # Excludes:
 #   *-wal, *-shm   transient SQLite WAL files (re-derived on next open)
 #   *.tmp          partial atomic writes
+#
+# CRITICAL: this archive intentionally includes BOTH:
+#   master.key                          — XSalsa20-Poly1305 key for at-rest
+#                                         credential encryption
+#   credentials_at_rest/{user_id}.enc   — encrypted user Bybit credentials
+# A restore that recovers one without the other can't decrypt user creds.
+# Do NOT add either to the exclude list — losing the master key forces
+# every user to push a fresh Bybit API key (which they can only generate
+# once, then never see the secret again).
 log "creating ${NAME} from ${ARTIFACT_DIR}"
 if ! tar --create --gzip \
         --exclude='*-wal' \

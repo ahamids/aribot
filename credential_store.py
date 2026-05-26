@@ -1,10 +1,18 @@
-"""In-memory, per-user store for iOS-pushed Bybit credentials.
+"""Per-user store for pushed Bybit credentials, with optional at-rest encryption.
 
-The sidecar receives sealed-box payloads from the iOS app at POST /credentials,
+The sidecar receives sealed-box payloads from the web app at POST /credentials,
 decrypts them with the host keypair (bot_keypair.HostIdentity), validates the
 keys against Bybit's /v5/user/query-api, and stores the plaintext in this
 process-local store. The trading bot fetches the plaintext via the IPC handoff
-(credential_pipe) at startup; the keys never touch disk.
+(credential_pipe) at startup.
+
+At-rest encryption (added 2026-05-26): when a `master_key` is provided at
+construction, successful pushes are also serialized → XSalsa20-Poly1305
+secretbox-encrypted → written atomically to `state_dir/credentials_at_rest/{user_id}.enc`.
+On the next sidecar boot, `load_all_from_disk()` decrypts every file back
+into the in-memory store so users don't have to re-push after a deploy or
+restart. The master key lives at `state_dir/master.key` (mode 600). When
+`master_key=None` the store stays memory-only (legacy/test mode).
 
 Multi-tenant model: every entry is keyed by `user_id` (typically a Supabase
 UUID, but treated as an opaque non-empty string by this module — the legacy
@@ -39,9 +47,12 @@ import datetime
 import json
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
+
+import nacl.secret
+import nacl.utils
 
 from bot_keypair import HostIdentity, CredentialDecryptError
 from secret_loader import (
@@ -55,7 +66,53 @@ log = logging.getLogger("aribot.credentials")
 
 
 _REPLAY_FILE = "replay_state.json"
+_MASTER_KEY_FILE = "master.key"
+_CREDENTIAL_DIR = "credentials_at_rest"
 _MAX_CLOCK_SKEW_SECONDS = 60
+
+
+def load_or_create_master_key(state_dir: Path) -> bytes:
+    """Load the 32-byte symmetric master key, generating it on first boot.
+
+    Stored at `state_dir/master.key` mode 600. The key NEVER rotates — if
+    this file is lost, every persisted credentials_at_rest/*.enc becomes
+    garbage. The nightly B2 backup MUST include this file alongside the
+    encrypted credential files; restoring one without the other is useless.
+
+    Sidecar threat model: if an attacker can read this file off disk they
+    can also read the encrypted credential files in the same state dir, so
+    on-disk encryption protects against backup leakage and stolen disk
+    images — not against a fully-compromised host.
+    """
+    path = state_dir / _MASTER_KEY_FILE
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        data = None
+    if data is not None:
+        if len(data) != nacl.secret.SecretBox.KEY_SIZE:
+            raise ValueError(
+                f"master key at {path} is {len(data)} bytes, "
+                f"expected {nacl.secret.SecretBox.KEY_SIZE}"
+            )
+        return data
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(key)
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    tmp.replace(path)
+    log.warning(
+        "generated new credentials master key at %s — back this file up "
+        "alongside %s/*.enc or restored credentials will be unrecoverable",
+        path,
+        _CREDENTIAL_DIR,
+    )
+    return key
 
 
 @dataclass
@@ -159,9 +216,21 @@ def _short_uid(user_id: str) -> str:
 
 
 class CredentialStore:
-    """Thread-safe in-memory holder for iOS-supplied credentials, keyed by user_id."""
+    """Thread-safe holder for pushed Bybit credentials, keyed by user_id.
 
-    def __init__(self, host: HostIdentity, state_dir: Path):
+    Memory-resident by default; if `master_key` is provided at construction
+    the store also persists each successful push under `state_dir/credentials_at_rest/`
+    encrypted with libsodium secretbox (XSalsa20-Poly1305). On startup the
+    caller invokes `load_all_from_disk()` to restore them.
+    """
+
+    def __init__(
+        self,
+        host: HostIdentity,
+        state_dir: Path,
+        *,
+        master_key: Optional[bytes] = None,
+    ):
         self._host = host
         self._state_dir = state_dir
         self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -171,6 +240,97 @@ class CredentialStore:
         # alongside real Supabase UUIDs; both are treated as opaque keys.
         self._by_user: Dict[str, LoadedCredentials] = {}
         self._replay = _load_replay_state(state_dir / _REPLAY_FILE)
+
+        if master_key is not None:
+            if len(master_key) != nacl.secret.SecretBox.KEY_SIZE:
+                raise ValueError(
+                    f"master_key must be {nacl.secret.SecretBox.KEY_SIZE} bytes, "
+                    f"got {len(master_key)}"
+                )
+            self._box: Optional[nacl.secret.SecretBox] = nacl.secret.SecretBox(master_key)
+            self._cred_dir: Optional[Path] = state_dir / _CREDENTIAL_DIR
+            self._cred_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self._cred_dir.chmod(0o700)
+            except OSError:
+                pass
+        else:
+            self._box = None
+            self._cred_dir = None
+
+    @property
+    def at_rest_enabled(self) -> bool:
+        return self._box is not None
+
+    def load_all_from_disk(self) -> int:
+        """Decrypt every persisted credentials_at_rest/*.enc and populate the
+        in-memory store. Returns count of loaded entries. Failures per file
+        log a warning and skip — never crash the sidecar on one bad record."""
+        if self._box is None or self._cred_dir is None:
+            return 0
+        loaded = 0
+        skipped = 0
+        for path in sorted(self._cred_dir.glob("*.enc")):
+            uid = path.stem
+            try:
+                ct = path.read_bytes()
+                pt = self._box.decrypt(ct)
+                payload = json.loads(pt.decode("utf-8"))
+                cred = LoadedCredentials(**payload)
+            except Exception as exc:
+                log.warning(
+                    "skipping unreadable persisted credentials at %s: %s",
+                    path.name,
+                    exc,
+                )
+                skipped += 1
+                continue
+            with self._lock:
+                self._by_user[uid] = cred
+            loaded += 1
+        if loaded or skipped:
+            log.info(
+                "credentials at-rest: restored %d record(s) from disk (%d skipped)",
+                loaded,
+                skipped,
+            )
+        return loaded
+
+    def _persist_to_disk(self, uid: str, cred: LoadedCredentials) -> None:
+        """Encrypt + atomically write a single tenant's credentials. Called
+        after a successful in-memory write so the next sidecar boot sees the
+        creds without the user re-pushing. No-op when at-rest is disabled."""
+        if self._box is None or self._cred_dir is None:
+            return
+        path = self._cred_dir / f"{uid}.enc"
+        try:
+            payload = json.dumps(asdict(cred), sort_keys=True).encode("utf-8")
+            ct = bytes(self._box.encrypt(payload))
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_bytes(ct)
+            try:
+                tmp.chmod(0o600)
+            except OSError:
+                pass
+            tmp.replace(path)
+        except OSError as exc:
+            log.warning(
+                "could not persist credentials for user=%s: %s",
+                _short_uid(uid),
+                exc,
+            )
+
+    def _delete_persisted(self, uid: str) -> None:
+        if self._cred_dir is None:
+            return
+        try:
+            (self._cred_dir / f"{uid}.enc").unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning(
+                "could not delete persisted credentials for user=%s: %s",
+                _short_uid(uid),
+                exc,
+            )
 
     @staticmethod
     def _check_user_id(user_id: str) -> str:
@@ -203,8 +363,13 @@ class CredentialStore:
     def clear(self, user_id: str) -> None:
         uid = self._check_user_id(user_id)
         with self._lock:
-            if self._by_user.pop(uid, None) is not None:
-                log.info("credential store cleared for user=%s", _short_uid(uid))
+            popped = self._by_user.pop(uid, None) is not None
+        # Always attempt to remove the on-disk copy even when memory was empty —
+        # the sidecar may have just been restarted and the user clicked Wipe
+        # before any creds were loaded from disk.
+        self._delete_persisted(uid)
+        if popped:
+            log.info("credential store cleared for user=%s", _short_uid(uid))
 
     def clear_all_for_shutdown(self) -> None:
         """Drop every tenant's credentials from RAM. Intended for sidecar
@@ -338,25 +503,34 @@ class CredentialStore:
         fingerprint = _key_fingerprint(read_key)
         validated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+        cred = LoadedCredentials(
+            read_api_key=read_key,
+            read_api_secret=read_secret,
+            trade_api_key=trade_key,
+            trade_api_secret=trade_secret,
+            fingerprint=fingerprint,
+            validated_at_iso=validated_at,
+            source="ios",
+        )
         with self._lock:
-            self._by_user[uid] = LoadedCredentials(
-                read_api_key=read_key,
-                read_api_secret=read_secret,
-                trade_api_key=trade_key,
-                trade_api_secret=trade_secret,
-                fingerprint=fingerprint,
-                validated_at_iso=validated_at,
-                source="ios",
-            )
+            self._by_user[uid] = cred
             self._replay.remember(sender_pubkey_b64, counter)
             _save_replay_state(self._state_dir / _REPLAY_FILE, self._replay)
 
+        # Persist outside the lock — disk IO + encryption shouldn't stall
+        # concurrent reads. A failure here logs a warning but the in-memory
+        # copy is already live, so the current session still works; the
+        # user just loses the survives-restart property until the next
+        # successful push.
+        self._persist_to_disk(uid, cred)
+
         log.info(
-            "credentials accepted: user=%s fingerprint=%s sender_pub=%s counter=%d",
+            "credentials accepted: user=%s fingerprint=%s sender_pub=%s counter=%d at_rest=%s",
             _short_uid(uid),
             fingerprint,
             sender_pubkey_b64[:12] + "…",
             counter,
+            "yes" if self.at_rest_enabled else "no",
         )
         return CredentialPushResult(
             ok=True, detail="credentials stored", fingerprint=fingerprint, status_code=200
@@ -457,3 +631,59 @@ if __name__ == "__main__":
         assert store.loaded_user_ids() == []
 
         print("credential_store smoke test passed.")
+
+    # ─── At-rest encryption round-trip ─────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        sd = Path(td)
+        master = load_or_create_master_key(sd)
+        assert (sd / _MASTER_KEY_FILE).exists()
+        assert len(master) == 32
+        # Idempotent — same key returned on subsequent loads.
+        assert load_or_create_master_key(sd) == master
+
+        store1 = CredentialStore(host=None, state_dir=sd, master_key=master)  # type: ignore[arg-type]
+        assert store1.at_rest_enabled
+        u = "deadbeef-cafe-0000-1111-222233334444"
+        cred = LoadedCredentials(
+            read_api_key="K_read", read_api_secret="K_read_secret",
+            trade_api_key="K_trade", trade_api_secret="K_trade_secret",
+            fingerprint="K_FP", validated_at_iso="2026-05-26T00:00:00+00:00",
+            source="ios",
+        )
+        # Bypass the Bybit roundtrip by writing through the internal API.
+        store1._by_user[u] = cred
+        store1._persist_to_disk(u, cred)
+        enc_path = sd / _CREDENTIAL_DIR / f"{u}.enc"
+        assert enc_path.exists(), f"expected encrypted file at {enc_path}"
+        on_disk = enc_path.read_bytes()
+        # Sanity: the ciphertext contains neither plaintext key in cleartext.
+        assert b"K_read" not in on_disk and b"K_trade" not in on_disk, \
+            "ciphertext leaked plaintext"
+
+        # Fresh store instance — simulates sidecar restart.
+        store2 = CredentialStore(host=None, state_dir=sd, master_key=master)  # type: ignore[arg-type]
+        assert not store2.is_loaded(u), "fresh store should not auto-load"
+        n = store2.load_all_from_disk()
+        assert n == 1, f"expected 1 record loaded, got {n}"
+        restored = store2.snapshot(u)
+        assert restored is not None
+        assert restored.read_api_key == "K_read"
+        assert restored.trade_api_secret == "K_trade_secret"
+        assert restored.fingerprint == "K_FP"
+
+        # clear() removes both in-memory AND on-disk copies so the user
+        # actually wiping their vault doesn't get them restored next boot.
+        store2.clear(u)
+        assert not store2.is_loaded(u)
+        assert not enc_path.exists(), "clear() must delete the encrypted file"
+
+        # Wrong master key produces a clean skip, not a crash.
+        store1._by_user[u] = cred
+        store1._persist_to_disk(u, cred)
+        wrong_key = bytes(32)  # zeros — clearly not the real key
+        store_bad = CredentialStore(host=None, state_dir=sd, master_key=wrong_key)  # type: ignore[arg-type]
+        loaded = store_bad.load_all_from_disk()
+        assert loaded == 0, "wrong key should fail to decrypt and return 0"
+        assert not store_bad.is_loaded(u)
+
+        print("credential_store at-rest encryption smoke test passed.")
