@@ -20,10 +20,21 @@ import { createClient } from "@/lib/supabase/server";
  * gets a real page, not a JSON blob.
  */
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = request.nextUrl;
+  const { searchParams } = request.nextUrl;
   const token_hash = searchParams.get("token_hash");
   const type = searchParams.get("type") as EmailOtpType | null;
   const next = searchParams.get("next") ?? "/dashboard";
+
+  // Caddy forwards the public hostname in X-Forwarded-Host but leaves
+  // the upstream Host header as localhost:3000, so request.nextUrl.origin
+  // gives us the loopback origin. Trust the forwarded headers — they're
+  // set by our own reverse proxy, not user-controlled.
+  const proto = request.headers.get("x-forwarded-proto") ?? "https";
+  const host =
+    request.headers.get("x-forwarded-host") ??
+    request.headers.get("host") ??
+    request.nextUrl.host;
+  const origin = `${proto}://${host}`;
 
   if (!token_hash || !type) {
     return NextResponse.redirect(`${origin}/sign-in?error=invalid_link`);
