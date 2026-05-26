@@ -70,13 +70,18 @@ fi
 log "npm ci in ${WEB_DIR}"
 sudo -u aribot bash -c "cd $WEB_DIR && npm ci --no-audit --no-fund"
 
-# next build reads NEXT_PUBLIC_* from env. Source web.env so the build
-# bakes the right Supabase URL/anon key into the browser bundle.
+# Next.js auto-loads `.env.production` from the project root during
+# `next build`. Symlink it to /etc/aribot/web.env so any subsequent
+# `npm run build` (manual deploy, CI, whatever) picks up NEXT_PUBLIC_*
+# without the caller remembering to `set -a; source web.env`. Without
+# this, a plain `npm run build` bakes empty strings into the bundle
+# and the browser fails with '@supabase/ssr: Your project's URL and
+# API key are required to create a Supabase client'.
+log "linking ${WEB_DIR}/.env.production -> ${WEB_ENV}"
+sudo -u aribot ln -snf "$WEB_ENV" "$WEB_DIR/.env.production"
+
 log "building Next.js for production"
 sudo -u aribot bash -c "
-    set -a
-    source $WEB_ENV
-    set +a
     cd $WEB_DIR
     NODE_OPTIONS='--max-old-space-size=1024' npm run build
 "
