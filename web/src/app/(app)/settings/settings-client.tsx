@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { setBybitTestnet } from "@/app/actions/bot";
 import { deleteCredentials } from "@/app/actions/vault";
@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/client";
 import { clearWrappedKey } from "@/lib/crypto/storage";
 import { deleteVault } from "@/lib/vault/store";
 import { ConfirmDialog } from "../dashboard/confirm-dialog";
+import { Toggle } from "@/components/toggle";
 
 interface SettingsClientProps {
   userId: string;
@@ -179,6 +180,40 @@ export function SettingsClient({
         </div>
       </Section>
 
+      {/* Notifications — stubbed UI surface per design spec
+          (design-pkg/screens-main.jsx:194-199). The backend doesn't have
+          subscription/dispatch endpoints yet, so toggling these only
+          persists locally in IndexedDB-flavored cookies; flip them when
+          you're ready to wire to a real notifications service. */}
+      <Section title="Notifications">
+        <p className="t-detail text-plum-mid">
+          What you&apos;d like Aribot to ping you about. Hooks aren&apos;t
+          live yet — toggling here saves your preference so it&apos;s ready
+          when the backend ships.
+        </p>
+        <div className="mt-3 flex flex-col divide-y divide-plum/10">
+          <NotificationToggle
+            id="notif-fill"
+            label="Trade fills"
+            body="A short note when the bot opens or closes a position."
+            storageKey="aribot.notify.fills"
+          />
+          <NotificationToggle
+            id="notif-error"
+            label="Errors"
+            body="If the bot crashes, loses Bybit, or trips the kill switch."
+            storageKey="aribot.notify.errors"
+            defaultOn
+          />
+          <NotificationToggle
+            id="notif-daily"
+            label="Daily summary"
+            body="Once-a-day digest of yesterday's trades and PnL."
+            storageKey="aribot.notify.daily"
+          />
+        </div>
+      </Section>
+
       {/* Danger zone */}
       <Section title="Danger zone">
         <p className="text-sm text-plum-mid">
@@ -298,7 +333,98 @@ export function SettingsClient({
         onConfirm={runSignOutEverywhere}
         onCancel={() => setDialog(null)}
       />
+
+      <AboutFooter />
     </>
+  );
+}
+
+/**
+ * Single notification preference. Persists to localStorage on flip;
+ * SSR-safe (defaults to the off / `defaultOn` value during the first
+ * render, hydrates from storage after mount). When the backend
+ * ships subscription endpoints, this component is the one place to
+ * wire the POST.
+ */
+function NotificationToggle({
+  id,
+  label,
+  body,
+  storageKey,
+  defaultOn = false,
+}: {
+  id: string;
+  label: string;
+  body: string;
+  storageKey: string;
+  defaultOn?: boolean;
+}) {
+  const [on, setOn] = useState(defaultOn);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Read from localStorage once after mount so the initial server-
+  // rendered markup matches the client (defaults), then hydrate to
+  // the persisted value without a flicker beyond the "no-fade".
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw === "1") setOn(true);
+      else if (raw === "0") setOn(false);
+    } catch {
+      // localStorage might be unavailable (private mode, SES). Keep default.
+    }
+    setHydrated(true);
+  }, [storageKey]);
+
+  function flip(next: boolean) {
+    setOn(next);
+    try {
+      window.localStorage.setItem(storageKey, next ? "1" : "0");
+    } catch {
+      // Silently ignore — the toggle still works in the current session.
+    }
+  }
+
+  return (
+    <div className="flex items-start justify-between gap-4 py-3">
+      <div className="min-w-0">
+        <label
+          htmlFor={id}
+          className="t-row-symbol text-plum block cursor-pointer"
+        >
+          {label}
+        </label>
+        <p className="mt-1 t-detail text-plum-mid">{body}</p>
+      </div>
+      <Toggle
+        checked={on}
+        onChange={flip}
+        ariaLabel={label}
+        disabled={!hydrated}
+      />
+    </div>
+  );
+}
+
+/**
+ * Footer About block per design-pkg/screens-main.jsx:201-203. Lives
+ * outside the <Section> stack so it reads as a "this is the end"
+ * marker rather than another config row. The build ID is injected by
+ * `npm run build` (scripts/write-build-id.mjs) — falls back to "dev"
+ * locally so the layout doesn't shift in `next dev`.
+ */
+function AboutFooter() {
+  const buildId = process.env.NEXT_PUBLIC_BUILD_ID ?? "dev";
+  return (
+    <div className="mt-2 pt-4 border-t-2 border-plum/10 text-center">
+      <p className="t-section-label text-plum-mid">aribot</p>
+      <p className="mt-1 t-detail text-plum-mid">
+        web · build <span className="font-mono">{buildId}</span>
+      </p>
+      <p className="mt-2 t-detail text-plum-soft">
+        Bring your own keys · Encrypted on your device
+      </p>
+    </div>
   );
 }
 

@@ -94,6 +94,8 @@ export default async function DashboardPage() {
 
       <section className="flex-1 px-4 py-6 sm:px-12 sm:py-8">
         <div className="mx-auto w-full max-w-3xl flex flex-col gap-4 sm:gap-6">
+          <Greeting mode={snap.status?.mode ?? null} />
+
           <ConnectionCard snap={snap} />
 
           {snap.status?.status === "killed" && <KillSwitchBanner />}
@@ -121,6 +123,38 @@ export default async function DashboardPage() {
           pauses when the tab is hidden. */}
       <AutoRefresh intervalMs={15000} />
     </main>
+  );
+}
+
+/**
+ * "HI THERE / Aribot" greeting block from design-pkg/screens-dashboard.jsx:19-25.
+ * Sits above the rest of the cards as a small grounding header. Mode
+ * appears as a read-only chip on the right so the operator always sees
+ * what the bot is configured for without scrolling down to the picker.
+ */
+function Greeting({ mode }: { mode: StatusResponse["mode"] | null }) {
+  const modeColor =
+    mode === "LIVE"
+      ? "bg-pnl-red text-paper"
+      : mode === "SHADOW"
+        ? "bg-yellow text-plum"
+        : mode === "PAPER"
+          ? "bg-peri text-paper"
+          : "bg-cream text-plum";
+  return (
+    <div className="flex items-center justify-between gap-3 pt-1 pb-1">
+      <div>
+        <div className="t-section-label text-plum-mid">HI THERE</div>
+        <div className="mt-0.5 t-section-h2 text-plum">Aribot</div>
+      </div>
+      {mode && (
+        <span
+          className={`outline-plum rounded-[12px] sticker px-3 py-1.5 t-section-label ${modeColor}`}
+        >
+          {mode}
+        </span>
+      )}
+    </div>
   );
 }
 
