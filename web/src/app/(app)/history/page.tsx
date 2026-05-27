@@ -61,8 +61,11 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
           </div>
 
           {backendError && (
-            <div className="outline-plum rounded-[14px] bg-pnl-red-soft p-4 text-sm">
-              <p className="font-bold text-plum">Backend unreachable</p>
+            <div className="outline-plum rounded-[14px] bg-cream-deep p-4 t-detail sticker">
+              <p className="font-black text-plum flex items-center gap-2">
+                <span aria-hidden>⚠</span>
+                Backend unreachable
+              </p>
               <p className="mt-1 text-plum-mid">{backendError}</p>
             </div>
           )}

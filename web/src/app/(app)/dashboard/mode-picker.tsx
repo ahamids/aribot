@@ -57,12 +57,22 @@ export function ModePicker({ currentMode }: { currentMode: BotMode }) {
   return (
     <>
       <form ref={formRef} action={action}>
-        <div className="outline-plum rounded-[18px] bg-paper p-5">
+        <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
           <div className="t-section-label text-plum-mid">Mode</div>
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
             {MODES.map(({ mode, label, description }) => {
               const isCurrent = mode === currentMode;
-              const isLive = mode === "LIVE";
+              // Spec mandates a brand color per mode when active (design-pkg
+              // /project/components.jsx:72-87 ModeChip):
+              //   PAPER  → peri   (the "safe sim" brand)
+              //   SHADOW → yellow (the "almost real" warning)
+              //   LIVE   → pnl-red (the "real money" alarm)
+              const activeBg =
+                mode === "LIVE"
+                  ? "bg-pnl-red text-paper"
+                  : mode === "SHADOW"
+                    ? "bg-yellow text-plum"
+                    : "bg-peri text-paper";
               return (
                 <button
                   key={mode}
@@ -73,19 +83,21 @@ export function ModePicker({ currentMode }: { currentMode: BotMode }) {
                   onClick={(e) => onModeClick(e, mode)}
                   className={`outline-plum rounded-[12px] p-3 text-left transition ${
                     isCurrent
-                      ? `sticker ${isLive ? "bg-pnl-red-soft" : "bg-mint"} cursor-default`
-                      : "bg-cream hover:bg-cream-deep"
+                      ? `sticker ${activeBg} cursor-default`
+                      : "bg-cream text-plum hover:bg-cream-deep"
                   } ${pending && !isCurrent ? "opacity-50" : ""}`}
                 >
-                  <div className="font-black text-plum flex items-center gap-2">
-                    {label}
+                  <div className="t-section-label flex items-center gap-2">
+                    <span className="text-sm font-black tracking-tight">
+                      {mode}
+                    </span>
                     {isCurrent && (
-                      <span className="text-xs font-bold uppercase tracking-wider text-plum-mid">
-                        current
-                      </span>
+                      <span className="t-section-label opacity-80">current</span>
                     )}
                   </div>
-                  <div className="mt-1 t-detail text-plum-mid">{description}</div>
+                  <div className="mt-1 t-detail opacity-90">
+                    {description}
+                  </div>
                 </button>
               );
             })}

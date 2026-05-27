@@ -205,14 +205,14 @@ export function SettingsClient({
 
       {feedback && (
         <div
-          className={`outline-plum rounded-[12px] p-3 text-sm ${
+          className={`outline-plum rounded-[12px] p-3 t-detail ${
             feedback.kind === "ok"
               ? "bg-mint text-plum"
-              : "bg-pnl-red-soft text-plum"
+              : "bg-cream-deep text-plum"
           }`}
         >
           <span className="font-bold">
-            {feedback.kind === "ok" ? "✓ " : "✗ "}
+            {feedback.kind === "ok" ? "✓ " : "⚠ "}
           </span>
           {feedback.text}
         </div>
@@ -310,8 +310,8 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
-      <h2 className="text-xl font-black text-plum">{title}</h2>
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
+      <h2 className="t-section-h2 text-plum">{title}</h2>
       <div className="mt-3">{children}</div>
     </div>
   );
@@ -354,7 +354,7 @@ function ToggleButton({
       disabled={disabled || selected}
       className={`outline-plum rounded-[10px] px-3 py-2 text-sm font-bold transition disabled:opacity-50 disabled:cursor-default ${
         selected
-          ? `sticker ${danger ? "bg-pnl-red-soft" : "bg-mint"} text-plum cursor-default`
+          ? `sticker ${danger ? "bg-yellow" : "bg-mint"} text-plum cursor-default`
           : "bg-cream text-plum hover:bg-cream-deep"
       }`}
     >
@@ -391,8 +391,9 @@ function DangerRow({
         type="button"
         onClick={onClick}
         disabled={disabled}
-        className="outline-plum rounded-[10px] bg-pnl-red-soft text-plum px-4 py-2 text-sm font-bold hover:opacity-90 disabled:opacity-50"
+        className="outline-plum rounded-[10px] bg-cream text-plum px-4 py-2 text-sm font-bold hover:bg-cream-deep disabled:opacity-50 inline-flex items-center gap-1.5"
       >
+        <span aria-hidden>⚠</span>
         {buttonLabel}
       </button>
     </div>

@@ -36,7 +36,8 @@ export default async function SignInPage({
           </p>
 
           {errorMessage && (
-            <div className="mt-6 outline-plum rounded-[12px] bg-pnl-red-soft text-plum px-4 py-3 text-sm">
+            <div className="mt-6 outline-plum rounded-[12px] bg-cream-deep text-plum px-4 py-3 text-sm">
+              <span aria-hidden className="mr-1.5 font-black">⚠</span>
               {errorMessage}
             </div>
           )}

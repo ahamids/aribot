@@ -67,7 +67,7 @@ export function HistoryClient({
   return (
     <>
       {/* Filters */}
-      <div className="outline-plum rounded-[18px] bg-paper p-5 flex flex-col gap-4">
+      <div className="outline-plum rounded-[18px] bg-paper p-5 sticker flex flex-col gap-4">
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
           <Field label="Window">
             <select
@@ -119,7 +119,7 @@ export function HistoryClient({
       </div>
 
       {/* Summary */}
-      <div className="outline-plum rounded-[18px] bg-paper p-5">
+      <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 tabular-nums">
           <Stat label="Trades" value={String(filtered.length)} />
           <Stat
@@ -155,7 +155,7 @@ export function HistoryClient({
       </div>
 
       {/* Table */}
-      <div className="outline-plum rounded-[18px] bg-paper p-5">
+      <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
         {filtered.length === 0 ? (
           <p className="text-sm text-plum-mid">
             No trades match the current filters.

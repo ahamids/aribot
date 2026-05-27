@@ -74,10 +74,8 @@ export function ControlsPanel({
   }
 
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
-      <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
-        Controls
-      </div>
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
+      <div className="t-section-label text-plum-mid">Controls</div>
 
       <div className="mt-3 flex flex-wrap gap-3">
         {killSwitchActive ? (
@@ -237,9 +235,10 @@ function ResultLine({
     );
   }
   return (
-    <div className="mt-3 outline-plum rounded-[10px] bg-pnl-red-soft px-3 py-2 text-sm">
+    <div className="mt-3 outline-plum rounded-[10px] bg-cream-deep px-3 py-2 t-detail">
       <div className="flex items-start justify-between gap-3">
         <p className="font-bold text-plum">
+          <span aria-hidden className="mr-1">⚠</span>
           {result.detail}
           {result.status > 0 && (
             <span className="ml-1 font-normal text-plum-mid">

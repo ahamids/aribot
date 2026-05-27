@@ -126,29 +126,41 @@ export default async function DashboardPage() {
 
 function ConnectionCard({ snap }: { snap: BackendSnapshot }) {
   const connected = snap.error === null;
+  // Spec rule (design-pkg/screens-sheets.jsx:195): red/green reserved for
+  // PnL, direction chips, kill switch, and LIVE confirm. A backend that's
+  // unreachable is not a PnL signal — degrade to the cream-deep "attention"
+  // surface and let the ⚠ glyph + text carry the alarm.
   return (
     <div
       className={`outline-plum rounded-[18px] p-5 sticker ${
-        connected ? "bg-mint" : "bg-pnl-red-soft"
+        connected ? "bg-mint" : "bg-cream-deep"
       }`}
     >
       <div className="flex items-center justify-between gap-4">
-        <div>
-          <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
-            Backend
-          </div>
-          <div className="mt-1 text-lg font-black text-plum">
-            {connected
-              ? `Connected — version ${snap.status?.version ?? "?"}`
-              : `Disconnected (${snap.error?.code})`}
-          </div>
-          {snap.error && (
-            <div className="mt-1 text-sm text-plum-mid">
-              {snap.error.message}
-            </div>
+        <div className="flex items-center gap-3 min-w-0">
+          {!connected && (
+            <span
+              aria-hidden
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-yellow outline-plum font-black text-plum shrink-0"
+            >
+              !
+            </span>
           )}
+          <div className="min-w-0">
+            <div className="t-section-label text-plum-mid">Backend</div>
+            <div className="mt-1 t-row-symbol text-plum">
+              {connected
+                ? `Connected — version ${snap.status?.version ?? "?"}`
+                : `Disconnected (${snap.error?.code})`}
+            </div>
+            {snap.error && (
+              <div className="mt-1 t-detail text-plum-mid break-words">
+                {snap.error.message}
+              </div>
+            )}
+          </div>
         </div>
-        <code className="hidden sm:block text-xs text-plum-mid bg-paper outline-plum rounded-[8px] px-2 py-1">
+        <code className="hidden sm:block t-detail text-plum-mid bg-paper outline-plum rounded-[8px] px-2 py-1 shrink-0">
           api.aribot.app
         </code>
       </div>
@@ -193,16 +205,21 @@ function StatusCard({
   status: StatusResponse;
   equity: EquityResponse | null;
 }) {
+  // Pill: each status pairs a label with a glyph so the signal isn't
+  // carried by color alone (the spec's color-blind rule, design-pkg
+  // chats/chat1.md:178-181). Glyphs match the design's circular dots:
+  //   ▶ running · ⏵ starting · ⏸ stopping · ■ stopped · … stale ·
+  //   ⚑ killed · ! crashed/error
   const pill = {
-    running: { label: "Running", bg: "bg-mint" },
-    starting: { label: "Starting", bg: "bg-yellow" },
-    stopping: { label: "Stopping", bg: "bg-yellow" },
-    stopped: { label: "Stopped", bg: "bg-paper" },
-    stale: { label: "Stale", bg: "bg-yellow" },
-    killed: { label: "Kill switch", bg: "bg-pnl-red-soft" },
-    crashed: { label: "Crashed", bg: "bg-pnl-red-soft" },
-    error: { label: "Error", bg: "bg-pnl-red-soft" },
-  }[status.status] ?? { label: status.status, bg: "bg-paper" };
+    running:  { label: "Running",     bg: "bg-mint",         glyph: "▶" },
+    starting: { label: "Starting",    bg: "bg-yellow",       glyph: "…" },
+    stopping: { label: "Stopping",    bg: "bg-yellow",       glyph: "…" },
+    stopped:  { label: "Stopped",     bg: "bg-paper",        glyph: "■" },
+    stale:    { label: "Stale",       bg: "bg-yellow",       glyph: "?" },
+    killed:   { label: "Kill switch", bg: "bg-pnl-red-soft", glyph: "⚑" },
+    crashed:  { label: "Crashed",     bg: "bg-pnl-red-soft", glyph: "!" },
+    error:    { label: "Error",       bg: "bg-pnl-red-soft", glyph: "!" },
+  }[status.status] ?? { label: status.status, bg: "bg-paper", glyph: "?" };
 
   const { pose, tone } = mascotForStatus(status.status);
   const pnlSign = status.todaysPnl >= 0 ? "+" : "";
@@ -221,8 +238,11 @@ function StatusCard({
           <div className="t-section-label text-plum-mid">Bot status</div>
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <span
-              className={`outline-plum rounded-[8px] ${pill.bg} px-2.5 py-1 text-sm font-bold`}
+              className={`outline-plum rounded-[8px] ${pill.bg} px-2.5 py-1 text-sm font-bold inline-flex items-center gap-1.5`}
             >
+              <span aria-hidden className="text-xs font-black leading-none">
+                {pill.glyph}
+              </span>
               {pill.label}
             </span>
             <span className="t-detail text-plum-mid">
@@ -319,7 +339,7 @@ function CredentialsCard({
   const isOptional = mode === "PAPER" && !credentials.loaded;
   return (
     <div
-      className={`outline-plum rounded-[18px] p-5 ${
+      className={`outline-plum rounded-[18px] p-5 sticker ${
         credentials.loaded
           ? "bg-paper"
           : isOptional

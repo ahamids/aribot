@@ -94,7 +94,7 @@ export function ConfirmDialog({
             autoFocus
             className={`outline-plum-thick rounded-[12px] px-4 py-2 font-black sticker disabled:opacity-50 disabled:translate-y-0 transition hover:translate-y-[-2px] ${
               tone === "danger"
-                ? "bg-pnl-red-soft text-plum"
+                ? "bg-pnl-red text-paper"
                 : "bg-coral text-plum"
             }`}
           >

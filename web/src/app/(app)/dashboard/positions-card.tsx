@@ -6,11 +6,9 @@ export function PositionsCard({
   positions: PositionsResponse | null;
 }) {
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
       <div className="flex items-baseline justify-between gap-4">
-        <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
-          Open positions
-        </div>
+        <div className="t-section-label text-plum-mid">Open positions</div>
         {positions && (
           <div className="text-xs text-plum-soft">
             {positions.positions.length} open

@@ -80,9 +80,12 @@ export function VaultWizard({ userId }: { userId: string }) {
   }
   if (error) {
     return (
-      <div className="outline-plum rounded-[18px] bg-pnl-red-soft p-5">
-        <p className="font-bold text-plum">Vault error</p>
-        <p className="mt-2 text-sm text-plum-mid">{error}</p>
+      <div className="outline-plum rounded-[18px] bg-cream-deep p-5 sticker">
+        <p className="font-black text-plum flex items-center gap-2">
+          <span aria-hidden>⚠</span>
+          Vault error
+        </p>
+        <p className="mt-2 t-detail text-plum-mid">{error}</p>
       </div>
     );
   }
@@ -338,7 +341,7 @@ function UnlockFlow({
         </p>
       </div>
 
-      <div className="outline-plum rounded-[18px] bg-paper p-5">
+      <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
         <label
           htmlFor="passphrase"
           className="text-xs uppercase font-bold tracking-wider text-plum-mid"
@@ -387,8 +390,9 @@ function UnlockFlow({
           <button
             onClick={resetVault}
             disabled={busy}
-            className="outline-plum rounded-[14px] bg-pnl-red-soft text-plum px-5 py-2.5 font-bold hover:bg-pnl-red-soft"
+            className="outline-plum rounded-[14px] bg-cream text-plum px-5 py-2.5 font-bold hover:bg-cream-deep inline-flex items-center gap-1.5"
           >
+            <span aria-hidden>⚠</span>
             Reset vault
           </button>
         </div>
@@ -492,7 +496,7 @@ function RecoverFlow({
       </div>
 
       {step === 1 && (
-        <div className="outline-plum rounded-[18px] bg-paper p-5">
+        <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
           <label
             htmlFor="code"
             className="text-xs uppercase font-bold tracking-wider text-plum-mid"
@@ -530,7 +534,7 @@ function RecoverFlow({
       )}
 
       {step === 2 && (
-        <div className="outline-plum rounded-[18px] bg-paper p-5">
+        <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
           <p className="font-black text-plum">
             Recovery code accepted.
           </p>
@@ -644,7 +648,7 @@ function PassphraseStep({
     showAck;
 
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
       <h2 className="text-xl font-black text-plum">{title}</h2>
       <p className="mt-2 text-sm text-plum-mid">{subtitle}</p>
 
@@ -722,7 +726,7 @@ function RecoveryCodeStep({
     });
   }
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
       <h2 className="text-xl font-black text-plum">
         Save your recovery code
       </h2>
@@ -790,7 +794,7 @@ function BybitKeysStep({
         bybit.tradeKey.trim() !== bybit.readKey.trim()));
 
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
       <h2 className="text-xl font-black text-plum">Your Bybit API keys</h2>
       <p className="mt-2 text-sm text-plum-mid">
         Create at{" "}
@@ -891,7 +895,7 @@ function SubmitStep({
   return (
     <div
       className={`outline-plum rounded-[18px] p-5 sticker ${
-        result?.ok ? "bg-mint" : result ? "bg-pnl-red-soft" : "bg-paper"
+        result?.ok ? "bg-mint" : result ? "bg-cream-deep" : "bg-paper"
       }`}
     >
       <h2 className="text-xl font-black text-plum">

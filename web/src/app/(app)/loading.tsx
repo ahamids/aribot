@@ -26,7 +26,7 @@ export default function AppLoading() {
 function SkeletonCard({ heightClass }: { heightClass: string }) {
   return (
     <div
-      className={`outline-plum rounded-[18px] bg-paper p-5 ${heightClass} animate-pulse`}
+      className={`outline-plum rounded-[18px] bg-paper p-5 sticker ${heightClass} animate-pulse`}
     >
       <div className="h-3 w-24 rounded-sm bg-cream-deep" />
       <div className="mt-3 h-6 w-3/4 rounded-md bg-cream-deep" />

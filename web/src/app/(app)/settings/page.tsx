@@ -48,8 +48,11 @@ export default async function SettingsPage() {
           <h1 className="text-2xl sm:text-3xl font-black text-plum">Settings</h1>
 
           {backendError && (
-            <div className="outline-plum rounded-[14px] bg-pnl-red-soft p-4 text-sm">
-              <p className="font-bold text-plum">Backend unreachable</p>
+            <div className="outline-plum rounded-[14px] bg-cream-deep p-4 t-detail sticker">
+              <p className="font-black text-plum flex items-center gap-2">
+                <span aria-hidden>⚠</span>
+                Backend unreachable
+              </p>
               <p className="mt-1 text-plum-mid">{backendError}</p>
               <p className="mt-2 text-plum-mid">
                 Settings that require the backend are disabled until it&apos;s
@@ -66,8 +69,8 @@ export default async function SettingsPage() {
             botRunning={botRunning}
           />
 
-          <div className="outline-plum rounded-[18px] bg-paper p-5">
-            <h2 className="text-xl font-black text-plum">Appearance</h2>
+          <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
+            <h2 className="t-section-h2 text-plum">Appearance</h2>
             <p className="mt-2 text-sm text-plum-mid">
               Theme preference, stored in a cookie so it&apos;s applied
               server-side on the next paint (no flash of unstyled

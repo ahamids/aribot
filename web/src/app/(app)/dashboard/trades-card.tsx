@@ -7,9 +7,9 @@ export function TradesCard({ trades }: { trades: TradesResponse | null }) {
     trades?.trades.reduce((acc, t) => acc + t.pnl, 0) ?? 0;
 
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
       <div className="flex items-baseline justify-between gap-4 flex-wrap">
-        <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
+        <div className="t-section-label text-plum-mid">
           Recent trades · last 7 days
         </div>
         {trades && trades.trades.length > 0 && (
