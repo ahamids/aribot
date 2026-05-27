@@ -94,7 +94,10 @@ export default async function DashboardPage() {
 
       <section className="flex-1 px-4 py-6 sm:px-12 sm:py-8">
         <div className="mx-auto w-full max-w-3xl flex flex-col gap-4 sm:gap-6">
-          <Greeting mode={snap.status?.mode ?? null} />
+          <Greeting
+            mode={snap.status?.mode ?? null}
+            email={data.user.email ?? ""}
+          />
 
           <ConnectionCard snap={snap} />
 
@@ -127,12 +130,22 @@ export default async function DashboardPage() {
 }
 
 /**
- * "HI THERE / Aribot" greeting block from design-pkg/screens-dashboard.jsx:19-25.
- * Sits above the rest of the cards as a small grounding header. Mode
- * appears as a read-only chip on the right so the operator always sees
- * what the bot is configured for without scrolling down to the picker.
+ * Greeting block — kicker "HI THERE" + the user's display name, with the
+ * current mode as a colored chip on the right. Pattern from
+ * design-pkg/screens-dashboard.jsx:19-25 (which hardcoded "Aribot" as a
+ * brand placeholder in the mockup; we substitute the real user instead).
+ *
+ * Display name is derived from the email's local-part — the first
+ * dot/+/_-delimited token, title-cased ("hamid.evilove@gmail.com" → "Hamid").
+ * Falls back to "trader" if the email is missing or unparseable.
  */
-function Greeting({ mode }: { mode: StatusResponse["mode"] | null }) {
+function Greeting({
+  mode,
+  email,
+}: {
+  mode: StatusResponse["mode"] | null;
+  email: string;
+}) {
   const modeColor =
     mode === "LIVE"
       ? "bg-pnl-red text-paper"
@@ -145,7 +158,9 @@ function Greeting({ mode }: { mode: StatusResponse["mode"] | null }) {
     <div className="flex items-center justify-between gap-3 pt-1 pb-1">
       <div>
         <div className="t-section-label text-plum-mid">HI THERE</div>
-        <div className="mt-0.5 t-section-h2 text-plum">Aribot</div>
+        <div className="mt-0.5 t-section-h2 text-plum">
+          {displayNameFromEmail(email)}
+        </div>
       </div>
       {mode && (
         <span
@@ -156,6 +171,13 @@ function Greeting({ mode }: { mode: StatusResponse["mode"] | null }) {
       )}
     </div>
   );
+}
+
+function displayNameFromEmail(email: string): string {
+  const local = email.split("@")[0] ?? "";
+  const token = local.split(/[._+-]/)[0]?.trim();
+  if (!token) return "trader";
+  return token.charAt(0).toUpperCase() + token.slice(1);
 }
 
 function ConnectionCard({ snap }: { snap: BackendSnapshot }) {
