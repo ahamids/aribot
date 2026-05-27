@@ -1,10 +1,13 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { signUp } from "@/app/actions/auth";
+import { SecretInput } from "@/components/secret-input";
+import { ChunkyCheckbox } from "@/components/chunky-checkbox";
 
 export function SignUpForm() {
   const [state, action, pending] = useActionState(signUp, undefined);
+  const [password, setPassword] = useState("");
 
   return (
     <form action={action} className="flex flex-col gap-4">
@@ -16,27 +19,21 @@ export function SignUpForm() {
         autoComplete="email"
         errors={state?.errors?.email}
       />
-      <Field
-        label="Password (12+ chars)"
+      <SecretInput
         name="password"
-        type="password"
+        label="Password (12+ chars)"
+        value={password}
+        onChange={setPassword}
         required
         autoComplete="new-password"
-        errors={state?.errors?.password}
+        bg="paper"
+        error={state?.errors?.password?.[0]}
       />
 
-      <label className="flex items-start gap-3 text-sm text-plum-mid cursor-pointer">
-        <input
-          type="checkbox"
-          name="encryptionAck"
-          required
-          className="mt-1 h-4 w-4 accent-coral"
-        />
-        <span>
-          I understand that my Bybit API keys are encrypted on my device and
-          that losing my password means losing access to them.
-        </span>
-      </label>
+      <ChunkyCheckbox name="encryptionAck" required>
+        I understand that my Bybit API keys are encrypted on my device and
+        that losing my password means losing access to them.
+      </ChunkyCheckbox>
       {state?.errors?.encryptionAck && (
         <p className="text-sm text-pnl-red">{state.errors.encryptionAck[0]}</p>
       )}
@@ -71,14 +68,14 @@ function Field({
     <div className="flex flex-col gap-1.5">
       <label
         htmlFor={props.name}
-        className="text-sm font-bold uppercase tracking-wide text-plum-mid"
+        className="t-section-label text-plum-mid"
       >
         {label}
       </label>
       <input
         id={props.name}
         {...props}
-        className="outline-plum rounded-[12px] bg-paper text-plum px-4 py-3 text-base placeholder:text-plum-soft focus:outline-none focus:ring-2 focus:ring-coral focus:border-transparent"
+        className="outline-plum rounded-[12px] bg-paper text-plum px-4 py-3 t-body placeholder:text-plum-soft focus:outline-none focus:ring-2 focus:ring-coral focus:border-transparent"
       />
       {errors && errors.length > 0 && (
         <p className="text-sm text-pnl-red">{errors[0]}</p>

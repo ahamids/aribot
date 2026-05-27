@@ -27,6 +27,8 @@ import {
   type VaultRow,
 } from "@/lib/vault/store";
 import { getBotPubkey, pushCredentials } from "@/app/actions/vault";
+import { SecretInput } from "@/components/secret-input";
+import { TrustStrip } from "@/components/trust-strip";
 
 type Flow = "loading" | "setup" | "unlock" | "recover";
 
@@ -342,23 +344,16 @@ function UnlockFlow({
       </div>
 
       <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
-        <label
-          htmlFor="passphrase"
-          className="text-xs uppercase font-bold tracking-wider text-plum-mid"
-        >
-          Passphrase
-        </label>
-        <input
+        <SecretInput
           id="passphrase"
-          type="password"
+          label="Passphrase"
           autoComplete="current-password"
           autoFocus
           value={passphrase}
-          onChange={(e) => setPassphrase(e.target.value)}
+          onChange={setPassphrase}
           onKeyDown={(e) => {
             if (e.key === "Enter" && passphrase.length >= 12 && !busy) unlock();
           }}
-          className="mt-2 w-full outline-plum rounded-[12px] bg-cream text-plum px-4 py-3 placeholder:text-plum-soft focus:outline-none focus:ring-2 focus:ring-coral"
         />
 
         {error && (
@@ -542,25 +537,20 @@ function RecoverFlow({
             Set a new passphrase for this device. It replaces the one you
             forgot.
           </p>
-          <label
-            htmlFor="new-passphrase"
-            className="mt-4 block text-xs uppercase font-bold tracking-wider text-plum-mid"
-          >
-            New passphrase (12+ chars)
-          </label>
-          <input
-            id="new-passphrase"
-            type="password"
-            autoFocus
-            autoComplete="new-password"
-            value={passphrase}
-            onChange={(e) => setPassphrase(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && passphrase.length >= 12 && !busy)
-                setNewPassphraseAndPush();
-            }}
-            className="mt-2 w-full outline-plum rounded-[12px] bg-cream text-plum px-4 py-3 placeholder:text-plum-soft focus:outline-none focus:ring-2 focus:ring-coral"
-          />
+          <div className="mt-4">
+            <SecretInput
+              id="new-passphrase"
+              label="New passphrase (12+ chars)"
+              autoFocus
+              autoComplete="new-password"
+              value={passphrase}
+              onChange={setPassphrase}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && passphrase.length >= 12 && !busy)
+                  setNewPassphraseAndPush();
+              }}
+            />
+          </div>
           {error && (
             <p className="mt-3 text-sm text-pnl-red font-bold">{error}</p>
           )}
@@ -727,16 +717,20 @@ function RecoveryCodeStep({
   }
   return (
     <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
-      <h2 className="text-xl font-black text-plum">
-        Save your recovery code
-      </h2>
-      <p className="mt-2 text-sm text-plum-mid">
+      <h2 className="t-section-h2 text-plum">Save your recovery code</h2>
+      <p className="mt-2 t-detail text-plum-mid">
         This is shown <strong>once</strong>. Without it (and without your
         passphrase), you cannot recover your Bybit keys. Store it in a
         password manager.
       </p>
 
-      <div className="mt-4 outline-plum rounded-[14px] bg-cream-deep p-4">
+      <TrustStrip
+        className="mt-4"
+        title="Shown one time only"
+        body="Aribot never stores this code. If you close this page without saving it, the only path back into the vault is to reset and re-push your Bybit keys."
+      />
+
+      <div className="mt-4 outline-plum-thick rounded-[14px] bg-cream-deep p-4 sticker">
         <code className="block break-all font-mono text-lg font-bold text-plum tracking-wider">
           {formatRecoveryCode(code)}
         </code>
@@ -795,8 +789,8 @@ function BybitKeysStep({
 
   return (
     <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
-      <h2 className="text-xl font-black text-plum">Your Bybit API keys</h2>
-      <p className="mt-2 text-sm text-plum-mid">
+      <h2 className="t-section-h2 text-plum">Your Bybit API keys</h2>
+      <p className="mt-2 t-detail text-plum-mid">
         Create at{" "}
         <a
           href="https://testnet.bybit.com/app/user/api-management"
@@ -818,6 +812,12 @@ function BybitKeysStep({
         ). Permissions needed: <strong>Read</strong> +{" "}
         <strong>Derivatives Trade</strong>.
       </p>
+
+      <TrustStrip
+        className="mt-4"
+        title="Encrypted on this device"
+        body="Your Bybit keys are sealed with libsodium in this browser before they ever cross the network. Even we can't read them."
+      />
 
       <div className="mt-4 flex flex-col gap-3">
         <TextField
@@ -942,22 +942,13 @@ function PasswordField({
   autoComplete?: string;
 }) {
   return (
-    <div>
-      <label
-        htmlFor={id}
-        className="text-xs uppercase font-bold tracking-wider text-plum-mid"
-      >
-        {label}
-      </label>
-      <input
-        id={id}
-        type="password"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        autoComplete={autoComplete}
-        className="mt-2 w-full outline-plum rounded-[12px] bg-cream text-plum px-4 py-3 placeholder:text-plum-soft focus:outline-none focus:ring-2 focus:ring-coral"
-      />
-    </div>
+    <SecretInput
+      id={id}
+      label={label}
+      value={value}
+      onChange={onChange}
+      autoComplete={autoComplete}
+    />
   );
 }
 
@@ -974,17 +965,31 @@ function TextField({
   onChange: (v: string) => void;
   secret?: boolean;
 }) {
+  // Bybit key/secret strings are alphanumeric; monospace makes paste-typos
+  // (e.g., 0 vs O, l vs 1) easier to spot.
+  if (secret) {
+    return (
+      <SecretInput
+        id={id}
+        label={label}
+        value={value}
+        onChange={onChange}
+        autoComplete="off"
+        monospace
+      />
+    );
+  }
   return (
     <div>
       <label
         htmlFor={id}
-        className="text-xs uppercase font-bold tracking-wider text-plum-mid"
+        className="t-section-label text-plum-mid"
       >
         {label}
       </label>
       <input
         id={id}
-        type={secret ? "password" : "text"}
+        type="text"
         autoComplete="off"
         spellCheck={false}
         value={value}
