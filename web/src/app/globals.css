@@ -105,3 +105,68 @@ body {
 .outline-plum-thick {
   border: 3px solid var(--c-plum);
 }
+.outline-plum-heavy {
+  border: 4px solid var(--c-plum);
+}
+
+/* Type scale — verbatim from the design package's TypeSheet
+   (.design-pkg/aribot/project/screens-sheets.jsx:212-255). Used directly on
+   text elements so the hero/title/body/KV/section-label hierarchy is
+   consistent across screens.
+   - Hero is for the dashboard "Today's P&L" headline; 56/800/tabular.
+   - Page title goes on H1 of each route.
+   - Row symbol is the 17px BTCUSDT-style identifier in tables.
+   - Section label is the 11px uppercase chip above each card. */
+.t-hero {
+  font-size: 56px;
+  line-height: 1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.t-page-title {
+  font-size: 32px;
+  line-height: 1.1;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+.t-section-h2 {
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+.t-position-pnl {
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.t-row-symbol {
+  font-size: 17px;
+  line-height: 1.25;
+  font-weight: 800;
+}
+.t-body {
+  font-size: 16px;
+  line-height: 1.45;
+  font-weight: 600;
+}
+.t-kv {
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.t-detail {
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.t-section-label {
+  font-size: 11px;
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}

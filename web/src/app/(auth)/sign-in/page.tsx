@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { SignInForm } from "./form";
+import { Mascot } from "@/components/mascot";
 
 export default async function SignInPage({
   searchParams,
@@ -24,11 +25,14 @@ export default async function SignInPage({
 
       <section className="flex-1 flex items-center justify-center px-6 py-12">
         <div className="w-full max-w-md">
-          <h1 className="text-4xl font-black tracking-tight text-plum">
+          <div className="flex justify-center">
+            <Mascot pose="wink" tone="peri" size={120} />
+          </div>
+          <h1 className="mt-6 t-page-title text-plum text-center">
             Welcome back
           </h1>
-          <p className="mt-3 text-plum-mid">
-            Sign in to manage your bot, vault, and positions.
+          <p className="mt-3 t-body text-plum-mid text-center">
+            Quick check before you trade — sign in to your vault.
           </p>
 
           {errorMessage && (

@@ -17,6 +17,7 @@ import { TradesCard } from "./trades-card";
 import { EquitySparkline } from "./equity-sparkline";
 import { ControlsPanel } from "./controls-panel";
 import { AppNav } from "../nav";
+import { Mascot, type MascotPose, type MascotTone } from "@/components/mascot";
 
 export const dynamic = "force-dynamic";
 
@@ -155,6 +156,36 @@ function ConnectionCard({ snap }: { snap: BackendSnapshot }) {
   );
 }
 
+/**
+ * Maps backend status → mascot pose + tone. Spec's mascot lives in the
+ * StatusCard with its pose tied to bot state so a glance tells you what's
+ * happening before reading any text. Matches the design package's intent
+ * at `.design-pkg/aribot/project/screens-dashboard.jsx:36`.
+ */
+function mascotForStatus(
+  s: StatusResponse["status"],
+): { pose: MascotPose; tone: MascotTone } {
+  switch (s) {
+    case "running":
+      return { pose: "happy", tone: "mint" };
+    case "starting":
+      return { pose: "alert", tone: "yellow" };
+    case "stopping":
+      return { pose: "alert", tone: "yellow" };
+    case "stale":
+      return { pose: "questioning", tone: "yellow" };
+    case "stopped":
+      return { pose: "napping", tone: "cream" };
+    case "killed":
+      return { pose: "serious", tone: "coral" };
+    case "crashed":
+      return { pose: "sad", tone: "coral" };
+    case "error":
+    default:
+      return { pose: "questioning", tone: "yellow" };
+  }
+}
+
 function StatusCard({
   status,
   equity,
@@ -173,20 +204,28 @@ function StatusCard({
     error: { label: "Error", bg: "bg-pnl-red-soft" },
   }[status.status] ?? { label: status.status, bg: "bg-paper" };
 
+  const { pose, tone } = mascotForStatus(status.status);
+  const pnlSign = status.todaysPnl >= 0 ? "+" : "";
+  const pnlColor =
+    status.todaysPnl > 0
+      ? "text-pnl-green"
+      : status.todaysPnl < 0
+        ? "text-pnl-red"
+        : "text-plum";
+
   return (
-    <div className="outline-plum rounded-[18px] bg-paper p-5">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
-            Bot status
-          </div>
-          <div className="mt-1 flex items-center gap-3">
+    <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
+      <div className="flex items-center gap-4 flex-wrap">
+        <Mascot pose={pose} tone={tone} size={96} />
+        <div className="min-w-0 flex-1">
+          <div className="t-section-label text-plum-mid">Bot status</div>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
             <span
               className={`outline-plum rounded-[8px] ${pill.bg} px-2.5 py-1 text-sm font-bold`}
             >
               {pill.label}
             </span>
-            <span className="text-sm text-plum-mid">
+            <span className="t-detail text-plum-mid">
               mode <span className="font-bold text-plum">{status.mode}</span>
               {status.testnet && (
                 <span className="ml-1 text-plum-soft">(testnet)</span>
@@ -194,38 +233,30 @@ function StatusCard({
             </span>
             <RegimePill regime={status.btcRegime} />
           </div>
-        </div>
-        <div className="text-right">
-          <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
-            Open / cycles
-          </div>
-          <div className="mt-1 text-lg font-black text-plum">
-            {status.openPositions} / {status.cycleCount}
+          <div className="mt-2 t-detail text-plum-mid">
+            {status.openPositions} open ·{" "}
+            <span className="tabular-nums">{status.cycleCount}</span> cycles
           </div>
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-4">
-        <Stat
-          label="Balance"
-          value={`$${status.currentBalance.toFixed(2)}`}
-        />
-        <Stat
-          label="Today's P&L"
-          value={`${status.todaysPnl >= 0 ? "+" : ""}$${status.todaysPnl.toFixed(2)}`}
-          tone={
-            status.todaysPnl > 0
-              ? "green"
-              : status.todaysPnl < 0
-                ? "red"
-                : "neutral"
-          }
-        />
+      {/* Today's PnL hero — the spec's headline number for the dashboard. */}
+      <div className="mt-5 border-t-2 border-plum/10 pt-5">
+        <div className="t-section-label text-plum-mid">Today&apos;s P&amp;L</div>
+        <div className={`mt-1 t-hero ${pnlColor}`}>
+          {pnlSign}${status.todaysPnl.toFixed(2)}
+        </div>
+        <div className="mt-1 t-detail text-plum-mid">
+          Balance{" "}
+          <span className="tabular-nums font-bold text-plum">
+            ${status.currentBalance.toFixed(2)}
+          </span>
+        </div>
       </div>
 
       {equity && equity.points.length > 1 && (
         <div className="mt-4">
-          <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
+          <div className="t-section-label text-plum-mid">
             Equity · last {equity.rangeHours}h
           </div>
           <div className="mt-2">
@@ -235,7 +266,7 @@ function StatusCard({
       )}
 
       {status.reason && (
-        <p className="mt-3 text-sm text-plum-mid">{status.reason}</p>
+        <p className="mt-3 t-detail text-plum-mid">{status.reason}</p>
       )}
     </div>
   );
@@ -271,33 +302,6 @@ function RegimePill({ regime }: { regime?: string | null }) {
     >
       {c.label}
     </span>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  tone?: "neutral" | "green" | "red";
-}) {
-  const color =
-    tone === "green"
-      ? "text-pnl-green"
-      : tone === "red"
-        ? "text-pnl-red"
-        : "text-plum";
-  return (
-    <div>
-      <div className="text-xs uppercase font-bold tracking-wider text-plum-mid">
-        {label}
-      </div>
-      <div className={`mt-1 text-2xl font-black ${color} tabular-nums`}>
-        {value}
-      </div>
-    </div>
   );
 }
 
