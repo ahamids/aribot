@@ -7,7 +7,7 @@ interface NavProps {
    * Slug of the currently-active tab. Used to highlight the right link.
    * Pass the route's path segment, e.g. "dashboard", "history", "settings".
    */
-  active: "dashboard" | "history" | "settings";
+  active: "dashboard" | "positions" | "history" | "settings";
 }
 
 /**
@@ -40,6 +40,7 @@ export function AppNav({ email, active }: NavProps) {
           scroll if they ever overflow on a very narrow screen. */}
       <nav className="flex items-center gap-1 -mx-1 overflow-x-auto sm:overflow-visible">
         <NavLink href="/dashboard" label="Dashboard" active={active === "dashboard"} />
+        <NavLink href="/positions" label="Positions" active={active === "positions"} />
         <NavLink href="/history" label="History" active={active === "history"} />
         <NavLink href="/settings" label="Settings" active={active === "settings"} />
       </nav>
