@@ -10,10 +10,12 @@ import {
   type ControlResult,
 } from "@/app/actions/controls";
 import { ConfirmDialog } from "./confirm-dialog";
+import { TypedConfirmDialog } from "@/components/typed-confirm-dialog";
+import { HoldButton } from "@/components/hold-button";
 import type { StatusResponse } from "@/lib/api/aribot";
 
 type PendingAction = "start" | "stop" | "kill" | "clear" | null;
-type ConfirmKind = "start-live" | "start-non-live" | "stop" | "kill" | "clear" | null;
+type ConfirmKind = "start-live" | "start-non-live" | "stop" | "clear" | null;
 
 export function ControlsPanel({
   status,
@@ -120,14 +122,14 @@ export function ControlsPanel({
           {optimistic === "stop" ? "Stopping…" : "Stop"}
         </button>
 
-        <button
-          type="button"
-          onClick={() => setConfirm("kill")}
+        <HoldButton
+          onConfirm={() => runAction("kill", killBot)}
+          holdMs={1500}
+          label={optimistic === "kill" ? "TRIPPED" : "KILL · HOLD 1.5s"}
+          holdingLabel="TRIPPING…"
           disabled={!canKill || pending}
-          className="outline-plum rounded-[12px] bg-pnl-red-soft text-plum px-5 py-2.5 font-bold disabled:opacity-50"
-        >
-          {optimistic === "kill" ? "Killing…" : "Kill switch"}
-        </button>
+          ariaLabel="Kill switch — hold 1.5 seconds to trip"
+        />
       </div>
 
       {lastResult && (
@@ -140,25 +142,21 @@ export function ControlsPanel({
         ASAP and refuses to restart until you clear it.
       </p>
 
-      {/* Confirmation dialogs */}
-      <ConfirmDialog
+      {/* LIVE-mode start: typed confirmation per design pkg's safety
+          contract. The operator must literally type "LIVE" before the
+          destructive button enables — a modal alone isn't enough. */}
+      <TypedConfirmDialog
         open={confirm === "start-live"}
-        title="Start in LIVE mode?"
-        body={
+        title={
           <>
-            <p className="font-bold text-plum">
-              This places real orders against your real Bybit account.
-            </p>
-            <p className="mt-2">
-              Your Bybit keys are loaded, mode is LIVE, kill switch is
-              clear. If the bot finds a setup, it will trade with your
-              actual capital. Switch to PAPER or SHADOW first if you want
-              to dry-run.
-            </p>
+            Start in <span className="text-pnl-red">LIVE</span> mode?
           </>
         }
-        confirmLabel="Start LIVE bot"
-        tone="danger"
+        body="Real orders will be placed on Bybit using your trade key."
+        confirmWord="LIVE"
+        confirmLabel="Start live"
+        mascotPose="serious"
+        mascotTone="coral"
         busy={pending}
         onConfirm={() => runAction("start", startBot)}
         onCancel={() => setConfirm(null)}
@@ -196,27 +194,9 @@ export function ControlsPanel({
         onCancel={() => setConfirm(null)}
       />
 
-      <ConfirmDialog
-        open={confirm === "kill"}
-        title="Trip the kill switch?"
-        body={
-          <>
-            <p className="font-bold text-plum">
-              Emergency stop. Closes all open positions ASAP.
-            </p>
-            <p className="mt-2">
-              The kill flag stays set until you explicitly clear it, so
-              the bot can&apos;t auto-restart. Use this if the bot is
-              misbehaving or you need to pull the plug fast.
-            </p>
-          </>
-        }
-        confirmLabel="Trip kill switch"
-        tone="danger"
-        busy={pending}
-        onConfirm={() => runAction("kill", killBot)}
-        onCancel={() => setConfirm(null)}
-      />
+      {/* The Kill switch itself is a HoldButton above — no modal. The
+          modal-confirm path was the cosmetic failure the design spec
+          calls out: "a tap should never trip the kill switch". */}
 
       <ConfirmDialog
         open={confirm === "clear"}
