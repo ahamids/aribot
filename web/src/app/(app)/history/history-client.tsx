@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import type { Trade } from "@/lib/api/aribot";
+import { Mascot } from "@/components/mascot";
 
 type WinFilter = "all" | "wins" | "losses";
 type SideFilter = "all" | "LONG" | "SHORT";
@@ -157,9 +158,16 @@ export function HistoryClient({
       {/* Table */}
       <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
         {filtered.length === 0 ? (
-          <p className="text-sm text-plum-mid">
-            No trades match the current filters.
-          </p>
+          <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-6 py-2">
+            <Mascot pose="napping" tone="cream" size={96} />
+            <div className="flex-1 text-center sm:text-left">
+              <p className="t-row-symbol text-plum">No trades to show</p>
+              <p className="mt-1 t-detail text-plum-mid">
+                Either the bot hasn&apos;t closed any trades in this
+                window, or the filters above hide them all.
+              </p>
+            </div>
+          </div>
         ) : (
           <div className="-mx-2 overflow-x-auto">
             <table className="w-full text-sm tabular-nums">

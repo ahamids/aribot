@@ -1,4 +1,5 @@
 import type { TradesResponse, Trade } from "@/lib/api/aribot";
+import { Mascot } from "@/components/mascot";
 
 export function TradesCard({ trades }: { trades: TradesResponse | null }) {
   const wins = trades?.trades.filter((t) => t.pnl > 0).length ?? 0;
@@ -26,10 +27,13 @@ export function TradesCard({ trades }: { trades: TradesResponse | null }) {
       )}
 
       {trades && trades.trades.length === 0 && (
-        <p className="mt-3 text-sm text-plum-mid">
-          No closed trades yet. Trades show up here as the bot closes
-          positions (via take-profit, stop-loss, or manual exit).
-        </p>
+        <div className="mt-4 flex items-center gap-4">
+          <Mascot pose="napping" tone="cream" size={80} />
+          <p className="t-detail text-plum-mid">
+            No closed trades yet. Trades show up here as the bot closes
+            positions (via take-profit, stop-loss, or manual exit).
+          </p>
+        </div>
       )}
 
       {trades && trades.trades.length > 0 && (

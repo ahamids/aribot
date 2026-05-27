@@ -1,4 +1,5 @@
 import type { PositionsResponse } from "@/lib/api/aribot";
+import { Mascot } from "@/components/mascot";
 
 export function PositionsCard({
   positions,
@@ -23,11 +24,14 @@ export function PositionsCard({
       )}
 
       {positions && positions.positions.length === 0 && (
-        <p className="mt-3 text-sm text-plum-mid">
-          No open positions. The bot opens trades when its strategy
-          conditions are met; in PAPER or SHADOW mode no real orders
-          are placed.
-        </p>
+        <div className="mt-4 flex items-center gap-4">
+          <Mascot pose="napping" tone="cream" size={80} />
+          <p className="t-detail text-plum-mid">
+            No open positions. The bot opens trades when its strategy
+            conditions are met — in PAPER or SHADOW mode no real
+            orders are placed.
+          </p>
+        </div>
       )}
 
       {positions && positions.positions.length > 0 && (
