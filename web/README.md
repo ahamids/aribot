@@ -18,12 +18,13 @@ Next.js 16 web app for `aribot.app`. Talks to `https://api.aribot.app`
 | Milestone | Scope | Status |
 |---|---|---|
 | **M1** | Landing + sign-up + sign-in + auth-gated dashboard placeholder | shipped |
-| M2 | Bot connection setup (host URL + bearer token, stored in Supabase) | pending |
-| M3 | Encrypted Bybit API key vault (browser-native WebCrypto) | pending |
-| M4 | Live dashboard (positions, equity, today's PnL) | pending |
-| M5 | Start / stop / kill switch | pending |
-| M6 | History + settings | pending |
-| M7 | Polish (loading skeletons, mobile, dark mode) | pending |
+| M2 | Bot connection setup (host URL + bearer token, stored in Supabase) | shipped (single-host pivot, see below) |
+| M3 | Encrypted Bybit API key vault (browser-native WebCrypto) | shipped |
+| M4 | Live dashboard (positions, equity, today's PnL) | shipped |
+| M5 | Start / stop / kill switch | shipped |
+| M6 | History + settings | shipped |
+| M7 | Polish (loading skeletons, mobile, dark mode) | shipped |
+| **Design conformance** | Re-aligns the UI with `.design-pkg/aribot/` (mascot, type scale, sticker shadows, hold-to-confirm, typed-LIVE, trust strip, eye toggles, /positions route, onboarding, empty states, settings completeness) | shipped on `feat/design-conformance` |
 
 ## First-time setup
 
@@ -101,3 +102,40 @@ web/
 - **Light/dark theme:** light-only for now.
 - **Deployment:** local-only. Cloudflare Pages setup happens after M1
   review.
+
+## Differences from `.design-pkg/aribot`
+
+The design package was authored for a native iOS portrait experience.
+The web build aligns with it where it makes sense and deliberately
+diverges where the medium changes the surface. Capturing the diffs
+here so a future reader doesn't misread these as drift to be fixed.
+
+- **Single-host (single-tenant) deployment.** The design's BotSetup
+  screen (`screens-onboarding.jsx:187-235`) lets the user paste their
+  own `https://<vps>` and a bearer token. The web product is a single-
+  host SaaS at `api.aribot.app`; the user doesn't choose a server,
+  and the bearer token is their Supabase session JWT. The dashboard's
+  ConnectionCard still shows backend health, but there's no host
+  picker or "Test connection" button. If we ship a BYO-server tier
+  later, the design's BotSetup is the model to port.
+- **Top horizontal nav, not bottom tab bar.** The design uses a
+  bottom-anchored 4-item `TabBar` (`components.jsx:228-265`). On the
+  web we use a top horizontal nav (`(app)/nav.tsx`) with the same
+  four items (Dashboard · Positions · History · Settings) and the
+  same coral-active sticker treatment. The translation is platform-
+  appropriate; the affordance and color rules survive intact.
+- **Splash CTAs are stacked instead of full-bleed.** The design's
+  splash has full-width `Btn`s sized for iOS portrait. The web splash
+  centers them inside a max-w-md column so the layout doesn't sprawl
+  on a desktop monitor. Order and copy match the spec.
+- **No iOS-style "‹" back chevrons.** Auth screens in the design have
+  a chunky circular back button (`screens-onboarding.jsx:40`). On the
+  web we use Next.js client-side navigation + the browser back
+  button; an in-page chevron is redundant.
+- **Mascot poses constrained to what's defined in `mascot.jsx`.** Any
+  pose the design pkg adds later (e.g., a sliding-stop pose for a
+  specific empty state) will need to be ported before it's usable.
+
+If something in the deployed app doesn't match what's in
+`.design-pkg/aribot/` and isn't in this list, treat it as a bug — not
+an intentional deviation.

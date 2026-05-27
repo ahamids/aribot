@@ -580,34 +580,41 @@ function RecoverFlow({
 
 function SetupHeader({ step }: { step: 1 | 2 | 3 | 4 }) {
   const steps = ["Passphrase", "Recovery code", "Bybit keys", "Push"];
+  const total = steps.length;
+  const activeLabel = steps[step - 1];
   return (
     <div>
-      <h1 className="text-2xl sm:text-3xl font-black text-plum">
-        Set up your vault
-      </h1>
-      {/* On mobile, the 4 step tiles wrap to two rows instead of
-          overflowing horizontally with no scroll affordance. On sm+
-          they sit on a single row. */}
-      <div className="mt-4 flex flex-wrap gap-2">
-        {steps.map((label, i) => {
-          const n = (i + 1) as 1 | 2 | 3 | 4;
-          const active = n === step;
-          const done = n < step;
-          return (
-            <div
-              key={label}
-              className={`outline-plum rounded-[10px] px-2.5 py-1.5 text-xs font-bold whitespace-nowrap ${
-                active
-                  ? "sticker bg-coral text-plum"
-                  : done
-                    ? "bg-mint text-plum"
-                    : "bg-paper text-plum-soft"
-              }`}
-            >
-              {n}. {label}
-            </div>
-          );
-        })}
+      <h1 className="t-page-title text-plum">Set up your vault</h1>
+      {/* Step dots, matching the onboarding carousel aesthetic ported
+          from design-pkg/components.jsx:170-178. Active dot stretches to
+          a 26x8 pill in coral; done dots fill mint; pending dots stay
+          cream-deep. Label sits next to the dots so the operator still
+          sees "what step is this?" without four chunky tiles. */}
+      <div className="mt-3 flex items-center gap-3">
+        <div className="flex items-center gap-1.5">
+          {steps.map((_, i) => {
+            const n = i + 1;
+            const isActive = n === step;
+            const isDone = n < step;
+            return (
+              <span
+                key={i}
+                aria-current={isActive ? "step" : undefined}
+                aria-label={`Step ${n}: ${steps[i]}`}
+                className={`h-2 outline-plum rounded-full transition-all ${
+                  isActive
+                    ? "w-7 bg-coral"
+                    : isDone
+                      ? "w-2 bg-mint"
+                      : "w-2 bg-cream-deep"
+                }`}
+              />
+            );
+          })}
+        </div>
+        <span className="t-section-label text-plum-mid">
+          Step {step} of {total} · {activeLabel}
+        </span>
       </div>
     </div>
   );

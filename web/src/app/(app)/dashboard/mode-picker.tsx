@@ -5,22 +5,15 @@ import { setBotMode } from "@/app/actions/bot";
 import { TypedConfirmDialog } from "@/components/typed-confirm-dialog";
 import type { BotMode } from "@/lib/api/aribot";
 
-const MODES: { mode: BotMode; label: string; description: string }[] = [
-  {
-    mode: "PAPER",
-    label: "Paper",
-    description: "Simulated trades. No real money. Safe default.",
-  },
-  {
-    mode: "SHADOW",
-    label: "Shadow",
-    description: "Real-time market, paper PnL. Use to validate a strategy.",
-  },
-  {
-    mode: "LIVE",
-    label: "Live",
-    description: "Real orders, real money. Requires Bybit keys.",
-  },
+// Mode descriptions tightened to the design pkg's terse one-liners
+// (.design-pkg/aribot/project/screens-onboarding.jsx:149). The chip
+// label itself is enough to carry "paper vs shadow vs live"; the body
+// line just needs to answer "what does this actually do?" in seven
+// words or fewer.
+const MODES: { mode: BotMode; description: string }[] = [
+  { mode: "PAPER", description: "Sim only." },
+  { mode: "SHADOW", description: "Dry-run real auth." },
+  { mode: "LIVE", description: "Real money." },
 ];
 
 export function ModePicker({ currentMode }: { currentMode: BotMode }) {
@@ -60,7 +53,7 @@ export function ModePicker({ currentMode }: { currentMode: BotMode }) {
         <div className="outline-plum rounded-[18px] bg-paper p-5 sticker">
           <div className="t-section-label text-plum-mid">Mode</div>
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {MODES.map(({ mode, label, description }) => {
+            {MODES.map(({ mode, description }) => {
               const isCurrent = mode === currentMode;
               // Spec mandates a brand color per mode when active (design-pkg
               // /project/components.jsx:72-87 ModeChip):
