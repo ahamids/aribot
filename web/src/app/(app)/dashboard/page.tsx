@@ -308,6 +308,10 @@ function StatusCard({
               )}
             </span>
             <RegimePill regime={status.btcRegime} />
+            <CooldownPill
+              active={status.cooldownActive}
+              untilIso={status.cooldownUntilIso}
+            />
           </div>
           <div className="mt-2 t-detail text-plum-mid">
             {status.openPositions} open ·{" "}
@@ -377,6 +381,45 @@ function RegimePill({ regime }: { regime?: string | null }) {
       title="Latest BTC regime gate; only entries in this direction are taken."
     >
       {c.label}
+    </span>
+  );
+}
+
+/**
+ * Consecutive-loss cooldown pill. The bot pauses NEW entries after a
+ * loss streak until cooldownUntilIso; existing positions are unaffected.
+ * Shown in yellow (caution, not error) with the time remaining. The
+ * dashboard re-renders every 15s via AutoRefresh, so the countdown
+ * stays current without a client-side ticker. Hidden when not cooling
+ * down or when the deadline has already passed (the bot clears the
+ * flag lazily, so we trust the timestamp over the bool).
+ */
+function CooldownPill({
+  active,
+  untilIso,
+}: {
+  active?: boolean;
+  untilIso?: string | null;
+}) {
+  if (!active || !untilIso) return null;
+  const until = Date.parse(untilIso);
+  if (Number.isNaN(until)) return null;
+  const msLeft = until - Date.now();
+  if (msLeft <= 0) return null; // deadline passed; bot will clear on next scan
+
+  const mins = Math.ceil(msLeft / 60_000);
+  const left =
+    mins < 60
+      ? `${mins}m`
+      : `${Math.floor(mins / 60)}h ${(mins % 60).toString().padStart(2, "0")}m`;
+
+  return (
+    <span
+      className="outline-plum rounded-[6px] px-1.5 py-0.5 text-xs font-bold bg-yellow text-plum inline-flex items-center gap-1"
+      title={`Consecutive-loss cooldown: no new entries until ${untilIso}. Open positions are unaffected.`}
+    >
+      <span aria-hidden>⏸</span>
+      cooldown · {left} left
     </span>
   );
 }

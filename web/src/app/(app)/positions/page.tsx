@@ -10,6 +10,7 @@ import { AppNav } from "../nav";
 import { AutoRefresh } from "../dashboard/auto-refresh";
 import { Mascot } from "@/components/mascot";
 import { RowSparkline } from "@/components/row-sparkline";
+import { ClosePositionButton } from "./close-button";
 
 export const dynamic = "force-dynamic";
 
@@ -176,7 +177,10 @@ function PositionCard({ p }: { p: Position }) {
         <span className="t-section-label text-plum-mid">
           {fmtAge(p.openedAtIso)}
         </span>
-        {traj && <RowSparkline data={traj} width={120} height={28} />}
+        <div className="flex items-center gap-3">
+          {traj && <RowSparkline data={traj} width={100} height={28} />}
+          <ClosePositionButton symbol={p.symbol} side={p.side} pnl={p.pnl} />
+        </div>
       </div>
     </div>
   );

@@ -31,3 +31,11 @@ keyrings.alt>=4
 #   in case Supabase ever rotates to asymmetric signing.
 # Deliberately NOT python-jose (larger surface, CVE history).
 PyJWT[crypto]>=2.8
+
+# Direct exchange access for POST /positions/close — the sidecar places a
+# reduce-only market order itself (via order_executor.OrderExecutor) so a
+# web "close position" works even when the bot process is stopped. Same
+# ccxt the bot uses; pinned-compatible. On the shared /opt/aribot/.venv
+# this is already present (the bot depends on it), listed here so a
+# sidecar-only install still pulls it.
+ccxt>=4.5

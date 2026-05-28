@@ -82,3 +82,37 @@ export async function killBot(): Promise<ControlResult> {
 export async function clearKill(): Promise<ControlResult> {
   return runControl(() => aribotApi.clearKill());
 }
+
+export type CloseResult =
+  | { ok: true; detail: string; symbol?: string }
+  | { ok: false; detail: string; status: number };
+
+/**
+ * Close a single open position. The backend places a reduce-only market
+ * order directly against Bybit (works whether or not the bot is running).
+ * Revalidates both the positions page and the dashboard so the now-flat
+ * position drops on the next render.
+ */
+export async function closePosition(symbol: string): Promise<CloseResult> {
+  try {
+    const res = await aribotApi.closePosition(symbol);
+    revalidatePath("/positions");
+    revalidatePath("/dashboard");
+    if (res.ok) {
+      return { ok: true, detail: res.detail, symbol: res.symbol };
+    }
+    return { ok: false, detail: res.detail, status: 200 };
+  } catch (e) {
+    if (e instanceof ApiError) {
+      const detail =
+        e.body &&
+        typeof e.body === "object" &&
+        "detail" in e.body &&
+        typeof (e.body as { detail: unknown }).detail === "string"
+          ? (e.body as { detail: string }).detail
+          : e.message;
+      return { ok: false, detail, status: e.status };
+    }
+    return { ok: false, detail: String(e), status: 0 };
+  }
+}

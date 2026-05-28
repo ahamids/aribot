@@ -45,6 +45,11 @@ export interface StatusResponse {
   //   'UNKNOWN'     -> no cycle has computed it yet
   //   null/undefined -> bot not running (snap not authoritative)
   btcRegime?: string | null;
+  // Consecutive-loss cooldown: the bot pauses new entries after a loss
+  // streak. cooldownActive is true while paused; cooldownUntilIso is the
+  // UTC ISO time the pause lifts. Both reflect the running bot only.
+  cooldownActive?: boolean;
+  cooldownUntilIso?: string | null;
 }
 
 export interface ModeResponse {
@@ -86,6 +91,14 @@ export interface Position {
 export interface PositionsResponse {
   positions: Position[];
   asOfIso: string;
+}
+
+export interface ClosePositionResponse {
+  ok: boolean;
+  detail: string;
+  symbol?: string;
+  orderId?: string | null;
+  closedQty?: number | null;
 }
 
 export interface Trade {
@@ -220,6 +233,11 @@ async function request<T>(
 export const aribotApi = {
   status: () => request<StatusResponse>("/status"),
   positions: () => request<PositionsResponse>("/positions"),
+  closePosition: (symbol: string) =>
+    request<ClosePositionResponse>("/positions/close", {
+      method: "POST",
+      body: JSON.stringify({ symbol }),
+    }),
   trades: (days = 7) => request<TradesResponse>(`/trades?days=${days}`),
   equity: (days = 1) => request<EquityResponse>(`/equity?days=${days}`),
   setMode: (mode: BotMode) =>

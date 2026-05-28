@@ -332,6 +332,11 @@ class StatusOut(BaseModel):
     # 'SELL' = shorts only, 'UNAVAILABLE' / 'UNKNOWN' = no recent
     # computation. None when no snapshot exists (bot has never run).
     btcRegime: Optional[str] = None
+    # Consecutive-loss cooldown. cooldownActive is True while the bot is
+    # pausing new entries after a loss streak; cooldownUntilIso is the
+    # UTC ISO time the pause lifts. Both reflect the running bot only.
+    cooldownActive: bool = False
+    cooldownUntilIso: Optional[str] = None
 
 
 class PositionOut(BaseModel):
@@ -350,6 +355,20 @@ class PositionOut(BaseModel):
 class PositionsOut(BaseModel):
     positions: list[PositionOut]
     asOfIso: str
+
+
+class ClosePositionBody(BaseModel):
+    # The ccxt unified symbol exactly as returned by GET /positions
+    # (e.g. "BTC/USDT:USDT"). Round-trips straight to ccxt.
+    symbol: str
+
+
+class CloseAckOut(BaseModel):
+    ok: bool
+    detail: str
+    symbol: Optional[str] = None
+    orderId: Optional[str] = None
+    closedQty: Optional[float] = None
 
 
 class TradeOut(BaseModel):
@@ -1602,6 +1621,23 @@ def build_app(
             str(btc_regime_raw).upper() if btc_regime_raw else None
         )
 
+        # Consecutive-loss cooldown: the bot pauses new entries after N
+        # losing trades until cooldown_until_utc. Like btcRegime, only
+        # authoritative while running — a stale "active" after the bot
+        # stopped would be misleading. cooldown_until_utc may be in the
+        # past even when active=True (the bot clears it lazily on the next
+        # entry scan), so the web computes "still cooling down?" from the
+        # timestamp rather than trusting the bool alone.
+        cooldown_active = (
+            bool(snap.get("cooldown_active", False)) if snap_authoritative else False
+        )
+        cooldown_until_raw = (
+            snap.get("cooldown_until_utc") if snap_authoritative else None
+        )
+        cooldown_until: Optional[str] = (
+            str(cooldown_until_raw) if cooldown_until_raw else None
+        )
+
         return StatusOut(
             version=VERSION,
             mode=mode,
@@ -1616,6 +1652,8 @@ def build_app(
             runId=str(snap.get("run_id", "")),
             reason=reason,
             btcRegime=btc_regime,
+            cooldownActive=cooldown_active,
+            cooldownUntilIso=cooldown_until,
         )
 
     @app.get("/positions", response_model=PositionsOut)
@@ -1629,6 +1667,174 @@ def build_app(
         return PositionsOut(
             positions=positions,
             asOfIso=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        )
+
+    @app.post("/positions/close", response_model=CloseAckOut)
+    def post_close_position(
+        body: ClosePositionBody,
+        user: AuthUser = Depends(require_user),
+    ) -> JSONResponse:
+        """Close a single open position directly against Bybit.
+
+        Works whether or not the bot process is running: the sidecar
+        places a reduce-only market order itself using the tenant's
+        loaded trade credentials. If the bot IS running, its per-cycle
+        reconcile (reconcile_runtime_positions_with_exchange) detects the
+        now-flat exchange position and books the close in its own ledger
+        within one loop — so PnL/session stats stay correct without any
+        cross-process signalling.
+
+        reduceOnly is enforced by OrderExecutor for non-entry orders, so
+        a race against the bot's own SL/TP can only ever reduce the
+        position, never open a counter-position.
+        """
+        symbol = (body.symbol or "").strip()
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+
+        cred = credential_store.snapshot(user.id)
+        if cred is None:
+            return JSONResponse(
+                CloseAckOut(
+                    ok=False,
+                    detail=(
+                        "No Bybit credentials loaded. Push your keys in the "
+                        "vault before closing positions."
+                    ),
+                    symbol=symbol,
+                ).model_dump(),
+                status_code=http_status.HTTP_412_PRECONDITION_FAILED,
+            )
+
+        # Resolve the tenant's exchange environment so we don't try to
+        # close a mainnet position against testnet (or vice-versa).
+        try:
+            if user.is_legacy:
+                testnet = _read_bybit_testnet(cfg)
+            else:
+                testnet = registry.get_testnet(user.id)  # type: ignore[union-attr]
+        except InvalidTenantId as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Idempotency DB lives beside the tenant DB but is a SEPARATE file
+        # from the bot's order-idempotency store, so a sidecar close never
+        # contends for the bot's sqlite write lock.
+        try:
+            tenant_db = _tenant_db_path(user)
+        except InvalidTenantId as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        idemp_db = tenant_db.parent / "web_close.idempotency.db"
+
+        # Import lazily: ccxt is heavy and only needed when a close is
+        # actually requested, not on every sidecar boot.
+        from order_executor import OrderExecutor
+
+        try:
+            executor = OrderExecutor(
+                cred.trade_api_key,
+                cred.trade_api_secret,
+                idempotency_db_path=str(idemp_db),
+            )
+            if testnet:
+                executor.exchange.set_sandbox_mode(True)
+        except Exception as exc:  # pragma: no cover - construction failure
+            print(
+                f"[status_server] close: OrderExecutor init failed: {exc}",
+                file=sys.stderr,
+            )
+            return JSONResponse(
+                CloseAckOut(
+                    ok=False,
+                    detail=f"Could not init exchange client: {exc}",
+                    symbol=symbol,
+                ).model_dump(),
+                status_code=http_status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # Read the live position so we close exactly what's open (size +
+        # direction), independent of the possibly-stale bot DB view.
+        try:
+            position = executor.exchange.fetch_position(symbol)
+        except Exception as exc:
+            return JSONResponse(
+                CloseAckOut(
+                    ok=False,
+                    detail=f"Could not fetch live position for {symbol}: {exc}",
+                    symbol=symbol,
+                ).model_dump(),
+                status_code=http_status.HTTP_502_BAD_GATEWAY,
+            )
+
+        contracts_raw = (
+            position.get("contracts") if isinstance(position, dict) else None
+        )
+        try:
+            contracts = abs(float(contracts_raw or 0.0))
+        except (TypeError, ValueError):
+            contracts = 0.0
+
+        if contracts <= 0.0:
+            # Already flat on the exchange — treat as success so the UI
+            # converges (the bot will drop its local copy on next reconcile).
+            return JSONResponse(
+                CloseAckOut(
+                    ok=True,
+                    detail=f"{symbol} is already flat on the exchange.",
+                    symbol=symbol,
+                    closedQty=0.0,
+                ).model_dump(),
+                status_code=http_status.HTTP_200_OK,
+            )
+
+        side = str(position.get("side") or "").strip().lower()
+        exit_side = "sell" if side == "long" else "buy"
+
+        # Minute-bucketed idempotency key so an accidental double-click
+        # within the same minute can't double-submit.
+        minute_bucket = int(
+            datetime.datetime.now(datetime.timezone.utc).timestamp() // 60
+        )
+        order_key = f"webclose:{symbol}:{exit_side}:{minute_bucket}"
+        result = executor.execute_order(
+            symbol=symbol,
+            order_type="market",
+            side=exit_side,
+            amount=contracts,
+            order_reason="manual_close_web",
+            idempotency_key=order_key,
+        )
+
+        if result.success:
+            if not user.is_legacy and meta_db is not None:
+                try:
+                    meta_db.record_audit(
+                        user.id,
+                        "position_closed_web",
+                        {"symbol": symbol, "qty": contracts, "orderId": result.order_id},
+                    )
+                except Exception as exc:
+                    print(
+                        f"[status_server] meta_db audit(position_closed_web) failed: {exc}",
+                        file=sys.stderr,
+                    )
+            return JSONResponse(
+                CloseAckOut(
+                    ok=True,
+                    detail=f"Close order placed for {symbol}.",
+                    symbol=symbol,
+                    orderId=result.order_id,
+                    closedQty=contracts,
+                ).model_dump(),
+                status_code=http_status.HTTP_200_OK,
+            )
+
+        return JSONResponse(
+            CloseAckOut(
+                ok=False,
+                detail=f"Bybit rejected the close: {result.message}",
+                symbol=symbol,
+            ).model_dump(),
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
         )
 
     @app.get("/equity", response_model=EquityOut)
